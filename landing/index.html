@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GapScout — Find the next thing to build on GitHub</title>
+  <meta name="description" content="An MCP server that surfaces underserved problem spaces on GitHub. Works in Claude, Cursor, Windsurf — any MCP-compatible client." />
+  <meta property="og:title" content="GapScout" />
+  <meta property="og:description" content="Find the next thing to build on GitHub — before everyone else does." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    code, pre, .mono { font-family: 'JetBrains Mono', monospace; }
+    .gradient-bg {
+      background: radial-gradient(ellipse at top, #1e293b 0%, #0f172a 50%, #020617 100%);
+    }
+    .glow {
+      box-shadow: 0 0 80px -20px rgba(34, 211, 238, 0.4);
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 antialiased">
+
+  <!-- Nav -->
+  <nav class="border-b border-slate-800/50">
+    <div class="max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-2xl">🔭</span>
+        <span class="font-bold text-lg">GapScout</span>
+      </div>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="#how" class="text-slate-400 hover:text-white transition">How it works</a>
+        <a href="#install" class="text-slate-400 hover:text-white transition">Install</a>
+        <a href="https://github.com/sowmyaarajan/gapscout" class="bg-white text-slate-900 px-4 py-2 rounded-md font-semibold hover:bg-slate-200 transition">
+          GitHub →
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="gradient-bg">
+    <div class="max-w-5xl mx-auto px-6 py-24 md:py-32 text-center">
+      <div class="inline-block px-3 py-1 mb-6 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs font-semibold tracking-wide uppercase">
+        MCP-native · stats-based · open source
+      </div>
+      <h1 class="text-5xl md:text-7xl font-extrabold leading-tight mb-6 tracking-tight">
+        Find the next thing to build<br />
+        <span class="bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">on GitHub.</span>
+      </h1>
+      <p class="text-xl md:text-2xl text-slate-400 max-w-3xl mx-auto mb-10 leading-relaxed">
+        GapScout surfaces underserved problem spaces by analyzing thousands of open issues across popular repos. Works inside Claude, Cursor, Windsurf — any MCP-compatible client.
+      </p>
+      <div class="flex flex-col sm:flex-row gap-4 justify-center">
+        <a href="#install" class="bg-cyan-500 text-slate-950 px-8 py-4 rounded-lg font-semibold hover:bg-cyan-400 transition glow">
+          Install in 60 seconds
+        </a>
+        <a href="https://github.com/sowmyaarajan/gapscout" class="border border-slate-700 px-8 py-4 rounded-lg font-semibold hover:bg-slate-900 transition">
+          Star on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Real Output -->
+  <section class="py-20 px-6">
+    <div class="max-w-5xl mx-auto">
+      <div class="text-center mb-12">
+        <h2 class="text-3xl md:text-4xl font-bold mb-4">Real findings. Live data. Zero curation.</h2>
+        <p class="text-slate-400 text-lg">A single call to <code class="text-cyan-300">find_gaps("rust")</code> just surfaced this:</p>
+      </div>
+
+      <div class="rounded-xl overflow-hidden border border-slate-800 bg-slate-900/50">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-900 border-b border-slate-800">
+            <tr>
+              <th class="px-6 py-4 text-left font-semibold text-slate-300">Gap</th>
+              <th class="px-6 py-4 text-right font-semibold text-slate-300">Reactions</th>
+              <th class="px-6 py-4 text-right font-semibold text-slate-300">Repos</th>
+              <th class="px-6 py-4 text-left font-semibold text-slate-300">Existing Solutions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800">
+            <tr>
+              <td class="px-6 py-4">Type system (specialization/trait aliases)</td>
+              <td class="px-6 py-4 text-right mono text-cyan-300">1,871</td>
+              <td class="px-6 py-4 text-right mono">11</td>
+              <td class="px-6 py-4 text-slate-400">Partial workarounds only</td>
+            </tr>
+            <tr class="bg-cyan-500/5">
+              <td class="px-6 py-4 font-semibold">Local LLM in Rust tools <span class="text-cyan-400">🎯</span></td>
+              <td class="px-6 py-4 text-right mono text-cyan-300 font-bold">1,325+</td>
+              <td class="px-6 py-4 text-right mono">8</td>
+              <td class="px-6 py-4 text-cyan-300 font-semibold">None</td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4">Package manager ergonomics (uv)</td>
+              <td class="px-6 py-4 text-right mono text-cyan-300">1,025</td>
+              <td class="px-6 py-4 text-right mono">12</td>
+              <td class="px-6 py-4 text-slate-400">PRs open, not merged</td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4">Rich terminal graphics (sixel)</td>
+              <td class="px-6 py-4 text-right mono text-cyan-300">654</td>
+              <td class="px-6 py-4 text-right mono">12</td>
+              <td class="px-6 py-4 text-slate-400">Unmaintained crates</td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4">Jujutsu VCS tooling</td>
+              <td class="px-6 py-4 text-right mono text-cyan-300">294+</td>
+              <td class="px-6 py-4 text-right mono">3</td>
+              <td class="px-6 py-4 text-slate-400">Essentially zero</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="text-center text-slate-500 text-sm mt-6">
+        Every row = validated demand with proof. Not opinions. Not vibes.
+      </p>
+    </div>
+  </section>
+
+  <!-- Who It's For -->
+  <section class="py-20 px-6 bg-slate-900/30">
+    <div class="max-w-5xl mx-auto">
+      <h2 class="text-3xl md:text-4xl font-bold text-center mb-12">Who's it for?</h2>
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="p-6 rounded-xl border border-slate-800 bg-slate-900/50">
+          <div class="text-3xl mb-3">🚀</div>
+          <h3 class="font-bold text-lg mb-2">Indie hackers & founders</h3>
+          <p class="text-slate-400">Stop guessing what to build. Validate ideas with demand signal, not gut feel.</p>
+        </div>
+        <div class="p-6 rounded-xl border border-slate-800 bg-slate-900/50">
+          <div class="text-3xl mb-3">💰</div>
+          <h3 class="font-bold text-lg mb-2">Early-stage VCs & scouts</h3>
+          <p class="text-slate-400">Scout deal flow in emerging OSS ecosystems before they hit Twitter.</p>
+        </div>
+        <div class="p-6 rounded-xl border border-slate-800 bg-slate-900/50">
+          <div class="text-3xl mb-3">🛠</div>
+          <h3 class="font-bold text-lg mb-2">OSS maintainers</h3>
+          <p class="text-slate-400">Discover what your users actually wish existed — across your whole space.</p>
+        </div>
+        <div class="p-6 rounded-xl border border-slate-800 bg-slate-900/50">
+          <div class="text-3xl mb-3">📈</div>
+          <h3 class="font-bold text-lg mb-2">Dev-tool PMs</h3>
+          <p class="text-slate-400">Find adjacent opportunities to your product, backed by real numbers.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section id="how" class="py-20 px-6">
+    <div class="max-w-4xl mx-auto">
+      <h2 class="text-3xl md:text-4xl font-bold text-center mb-4">How it works</h2>
+      <p class="text-center text-slate-400 text-lg mb-12 max-w-2xl mx-auto">
+        GapScout is a data tool. Your LLM is the brain. Together you get an insight engine.
+      </p>
+
+      <div class="space-y-4">
+        <div class="flex gap-4 p-6 rounded-xl border border-slate-800 bg-slate-900/30">
+          <div class="text-cyan-400 font-bold text-2xl">1</div>
+          <div>
+            <h3 class="font-bold mb-1">You ask your LLM a question</h3>
+            <p class="text-slate-400 text-sm">"What gaps exist in the Python ML ecosystem?"</p>
+          </div>
+        </div>
+        <div class="flex gap-4 p-6 rounded-xl border border-slate-800 bg-slate-900/30">
+          <div class="text-cyan-400 font-bold text-2xl">2</div>
+          <div>
+            <h3 class="font-bold mb-1">Your LLM calls GapScout via MCP</h3>
+            <p class="text-slate-400 text-sm">GapScout pulls live data from GitHub — top repos, open issues, abandonment signals.</p>
+          </div>
+        </div>
+        <div class="flex gap-4 p-6 rounded-xl border border-slate-800 bg-slate-900/30">
+          <div class="text-cyan-400 font-bold text-2xl">3</div>
+          <div>
+            <h3 class="font-bold mb-1">Stats-based clustering finds patterns</h3>
+            <p class="text-slate-400 text-sm">Cross-repo theme detection, demand scoring (reactions + comments + spread), abandoned-alternative tracking.</p>
+          </div>
+        </div>
+        <div class="flex gap-4 p-6 rounded-xl border border-slate-800 bg-slate-900/30">
+          <div class="text-cyan-400 font-bold text-2xl">4</div>
+          <div>
+            <h3 class="font-bold mb-1">Your LLM reasons over the result</h3>
+            <p class="text-slate-400 text-sm">You get a synthesized answer in plain English — not a wall of JSON.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-12 p-6 rounded-xl border border-cyan-500/30 bg-cyan-500/5">
+        <p class="text-cyan-200 font-semibold mb-2">💡 Why this matters</p>
+        <p class="text-slate-300">GapScout doesn't run any LLMs — it just fetches GitHub data and runs stats. The reasoning happens in your existing Claude, Cursor, or Windsurf subscription. No extra AI bill on top, no API keys to wire up, and the tool gets smarter every time you upgrade your LLM. BYO-LLM by design.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section id="install" class="py-20 px-6 bg-slate-900/30">
+    <div class="max-w-3xl mx-auto">
+      <h2 class="text-3xl md:text-4xl font-bold text-center mb-4">Install in 60 seconds</h2>
+      <p class="text-center text-slate-400 mb-12">Works with Claude Code, Claude Desktop, Cursor, Windsurf, Zed, and any MCP-compatible client.</p>
+
+      <div class="space-y-6">
+        <div>
+          <h3 class="font-semibold mb-3 text-slate-300">1. Clone & build</h3>
+          <pre class="bg-slate-950 border border-slate-800 rounded-lg p-4 overflow-x-auto text-sm"><code>git clone https://github.com/sowmyaarajan/gapscout.git
+cd gapscout
+npm install && npm run build</code></pre>
+        </div>
+
+        <div>
+          <h3 class="font-semibold mb-3 text-slate-300">2. Get a GitHub token</h3>
+          <p class="text-slate-400 text-sm mb-3">
+            Visit <a href="https://github.com/settings/tokens" class="text-cyan-400 hover:underline">github.com/settings/tokens</a> →
+            Generate new (classic) → check <code class="text-cyan-300">public_repo</code> → copy.
+          </p>
+        </div>
+
+        <div>
+          <h3 class="font-semibold mb-3 text-slate-300">3. Register with Claude Code</h3>
+          <pre class="bg-slate-950 border border-slate-800 rounded-lg p-4 overflow-x-auto text-sm"><code>claude mcp add gapscout node "/path/to/gapscout/dist/index.js" \
+  --env GITHUB_TOKEN=ghp_your_token \
+  --scope user</code></pre>
+        </div>
+
+        <div>
+          <h3 class="font-semibold mb-3 text-slate-300">4. Restart Claude Code, then chat</h3>
+          <div class="bg-slate-950 border border-slate-800 rounded-lg p-4 italic text-slate-400">
+            "Use gapscout to find the top 5 gaps in the Rust ecosystem"
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-12 text-center">
+        <a href="https://github.com/sowmyaarajan/gapscout" class="inline-block bg-cyan-500 text-slate-950 px-8 py-4 rounded-lg font-semibold hover:bg-cyan-400 transition glow">
+          Full instructions on GitHub →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-800 py-12 px-6">
+    <div class="max-w-5xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-2 text-slate-400">
+        <span>🔭</span>
+        <span class="font-semibold text-slate-300">GapScout</span>
+        <span class="text-sm">— MIT licensed</span>
+      </div>
+      <div class="flex gap-6 text-sm text-slate-400">
+        <a href="https://github.com/sowmyaarajan/gapscout" class="hover:text-white transition">GitHub</a>
+        <a href="https://github.com/sowmyaarajan/gapscout/issues" class="hover:text-white transition">Report issue</a>
+        <a href="https://modelcontextprotocol.io" class="hover:text-white transition">What's MCP?</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
