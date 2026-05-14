@@ -26,11 +26,12 @@ console.log(
 );
 
 console.log("\nAnalyzing gaps...\n");
-const gaps = findGaps(allIssues, repos, 5);
+const gaps = findGaps(allIssues, repos, 5, language);
 
 for (const [idx, g] of gaps.entries()) {
-  console.log(`#${idx + 1} — Theme: "${g.theme}"  (score: ${g.gapScore})`);
+  console.log(`#${idx + 1} — Theme: "${g.theme}"  (score: ${g.gapScore.toFixed(1)})`);
   console.log(`   Issues: ${g.issueCount} | Reactions: ${g.totalReactions} | Repos: ${g.affectedRepos.length}`);
+  console.log(`   Avg age: ${g.avgAgeDays}d | Avg participants: ${g.avgParticipants} | Velocity: ${g.velocityScore}`);
   console.log(`   Related: ${g.keywords.slice(0, 5).join(", ")}`);
   if (g.abandonedAlternatives.length) {
     console.log(`   Abandoned alternatives: ${g.abandonedAlternatives.join(", ")}`);
