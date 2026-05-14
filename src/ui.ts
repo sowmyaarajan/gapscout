@@ -13,7 +13,28 @@ if (!token) {
 
 const github = new GitHubClient(token);
 const app = new Hono();
-app.use("*", cors());
+
+app.use("*", cors({
+  origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
+  allowMethods: ["GET", "POST"],
+  allowHeaders: ["Content-Type"],
+}));
+
+app.use("*", async (c, next) => {
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("X-Frame-Options", "DENY");
+  c.header("X-XSS-Protection", "1; mode=block");
+  c.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  await next();
+});
+
+function safeError(e: any, context: string): Response {
+  console.error(`[GapScout] ${context}:`, e?.message ?? e);
+  return new Response(JSON.stringify({ error: "Request failed. Check server logs." }), {
+    status: 500,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 app.post("/api/find-gaps", async (c) => {
   try {
@@ -38,7 +59,7 @@ app.post("/api/find-gaps", async (c) => {
       gaps,
     });
   } catch (e: any) {
-    return c.json({ error: e.message }, 500);
+    return safeError(e, "API error");
   }
 });
 
@@ -78,7 +99,7 @@ app.post("/api/search-issues", async (c) => {
     const filtered = filterIssues(allIssues, filters);
     return c.json({ language, reposSearched, totalFound: filtered.length, filters, issues: filtered.slice(0, 50) });
   } catch (e: any) {
-    return c.json({ error: e.message }, 500);
+    return safeError(e, "API error");
   }
 });
 
@@ -95,7 +116,7 @@ app.post("/api/analyze-repo", async (c) => {
     const analysis = analyzeRepo(issues, repoInfo);
     return c.json(analysis);
   } catch (e: any) {
-    return c.json({ error: e.message }, 500);
+    return safeError(e, "API error");
   }
 });
 
@@ -131,7 +152,7 @@ app.post("/api/analyze-org", async (c) => {
       abandonedRepos: repos.filter((r) => r.isAbandoned).map((r) => r.fullName),
     });
   } catch (e: any) {
-    return c.json({ error: e.message }, 500);
+    return safeError(e, "API error");
   }
 });
 
@@ -153,7 +174,7 @@ app.get("/api/abandoned/:language", async (c) => {
       })),
     });
   } catch (e: any) {
-    return c.json({ error: e.message }, 500);
+    return safeError(e, "API error");
   }
 });
 
@@ -447,7 +468,7 @@ function renderGaps(containerId, data) {
       html += '<div class="keywords">' + gap.keywords.map(k => '<span class="kw-tag">' + esc(k) + '</span>').join('') + '</div>';
     }
     html += '<div class="issues-list">' + gap.sampleIssues.map(i =>
-      '<a class="issue-link" href="' + i.url + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,90)) + '</a>'
+      '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,90)) + '</a>'
     ).join('') + '</div>';
     html += '</div>';
   }
@@ -495,7 +516,7 @@ function renderIssuesTable(containerId, data) {
   for (const i of data.issues) {
     html += '<tr>';
     html += '<td style="white-space:nowrap;font-family:monospace;font-size:12px">' + esc(i.repo) + '</td>';
-    html += '<td><a href="' + i.url + '" target="_blank">' + esc(i.title.slice(0,80)) + '</a>' + (i.isStale ? ' <span class="stale-badge">stale</span>' : '') + '</td>';
+    html += '<td><a href="' + safeUrl(i.url) + '" target="_blank">' + esc(i.title.slice(0,80)) + '</a>' + (i.isStale ? ' <span class="stale-badge">stale</span>' : '') + '</td>';
     html += '<td style="white-space:nowrap">' + i.ageDays + 'd</td>';
     html += '<td>' + i.reactions + '</td>';
     html += '<td>' + i.participantCount + '</td>';
@@ -538,7 +559,7 @@ function renderRepoAnalysis(containerId, d) {
   // Top Issues
   html += '<div class="section"><h4>Top Issues by Demand</h4>';
   html += '<div class="issues-list">' + (d.topIssues||[]).map(i =>
-    '<a class="issue-link" href="' + i.url + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,90)) + (i.isStale ? ' <span class="stale-badge">stale</span>' : '') + '</a>'
+    '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,90)) + (i.isStale ? ' <span class="stale-badge">stale</span>' : '') + '</a>'
   ).join('') + '</div></div>';
 
   // Gaps
@@ -549,7 +570,7 @@ function renderRepoAnalysis(containerId, d) {
       html += '<div class="gap-card-header"><span class="gap-theme">' + esc(gap.theme) + '</span><span class="gap-score">Score: ' + gap.gapScore + '</span></div>';
       html += '<div class="gap-meta"><span class="meta-item"><strong>' + gap.issueCount + '</strong> issues</span><span class="meta-item"><strong>' + gap.totalReactions + '</strong> reactions</span><span class="meta-item">avg age <strong>' + gap.avgAgeDays + 'd</strong></span></div>';
       if (gap.keywords.length) html += '<div class="keywords">' + gap.keywords.map(k => '<span class="kw-tag">' + esc(k) + '</span>').join('') + '</div>';
-      html += '<div class="issues-list">' + (gap.sampleIssues||[]).map(i => '<a class="issue-link" href="' + i.url + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,80)) + '</a>').join('') + '</div>';
+      html += '<div class="issues-list">' + (gap.sampleIssues||[]).map(i => '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,80)) + '</a>').join('') + '</div>';
       html += '</div>';
     }
     html += '</div>';
@@ -579,7 +600,7 @@ function renderRepoAnalysis(containerId, d) {
   if (d.staleIssues && d.staleIssues.length) {
     html += '<div class="section"><h4>Stale Issues (' + d.staleIssues.length + ')</h4><table><thead><tr><th>Title</th><th>Age</th><th>Reactions</th></tr></thead><tbody>';
     for (const i of d.staleIssues.slice(0,20)) {
-      html += '<tr><td><a href="' + i.url + '" target="_blank">' + esc(i.title.slice(0,80)) + '</a></td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td></tr>';
+      html += '<tr><td><a href="' + safeUrl(i.url) + '" target="_blank">' + esc(i.title.slice(0,80)) + '</a></td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td></tr>';
     }
     html += '</tbody></table></div>';
   }
@@ -619,6 +640,13 @@ function renderAbandoned(containerId, data) {
 
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function safeUrl(url) {
+  try {
+    const p = new URL(url);
+    return (p.hostname === 'github.com' && p.protocol === 'https:') ? esc(url) : '#';
+  } catch { return '#'; }
 }
 
 // ── OPPORTUNITIES ──────────────────────────────────────────────
@@ -678,7 +706,7 @@ function renderOpportunityCards() {
     if (issue.isStale) html += '<span class="stale-badge">stale</span>';
     html += '</div>';
     html += '<div class="opp-card-actions">';
-    html += '<a class="btn-github" href="' + issue.url + '" target="_blank">Open on GitHub</a>';
+    html += '<a class="btn-github" href="' + safeUrl(issue.url) + '" target="_blank">Open on GitHub</a>';
     if (isPickedUp) {
       html += '<button class="btn-pickup picked" disabled>Picked Up</button>';
     } else {
@@ -717,7 +745,7 @@ function renderPickedIssues() {
   let html = '<div class="picked-section"><h4>My Picked Issues (' + picked.length + ')</h4>';
   picked.forEach(function(issue, idx) {
     html += '<div class="picked-item">';
-    html += '<a href="' + issue.url + '" target="_blank">' + esc(issue.title.slice(0,70)) + '</a>';
+    html += '<a href="' + safeUrl(issue.url) + '" target="_blank">' + esc(issue.title.slice(0,70)) + '</a>';
     html += '<span class="repo-name">' + esc(issue.repo) + '</span>';
     html += '<span style="color:#64748b;font-size:11px">' + issue.ageDays + 'd</span>';
     html += '<button class="btn-remove" onclick="removePickedIssue(' + idx + ')">✕</button>';
@@ -770,7 +798,7 @@ function renderOrgAnalysis(containerId, data) {
       html += '<div class="gap-card-header"><span class="gap-theme">' + esc(gap.theme) + '</span><span class="gap-score">Score: ' + Math.round(gap.gapScore) + '</span></div>';
       html += '<div class="gap-meta"><span class="meta-item"><strong>' + gap.issueCount + '</strong> issues</span><span class="meta-item"><strong>' + gap.totalReactions + '</strong> reactions</span><span class="meta-item"><strong>' + gap.affectedRepos.length + '</strong> repos</span><span class="meta-item">avg age <strong>' + gap.avgAgeDays + 'd</strong></span></div>';
       if (gap.keywords && gap.keywords.length) html += '<div class="keywords">' + gap.keywords.map(function(k) { return '<span class="kw-tag">' + esc(k) + '</span>'; }).join('') + '</div>';
-      html += '<div class="issues-list">' + (gap.sampleIssues||[]).map(function(i) { return '<a class="issue-link" href="' + i.url + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,80)) + '</a>'; }).join('') + '</div>';
+      html += '<div class="issues-list">' + (gap.sampleIssues||[]).map(function(i) { return '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,80)) + '</a>'; }).join('') + '</div>';
       html += '</div>';
     }
     html += '</div>';

@@ -42,6 +42,29 @@ function calcIsStale(createdAt: string, updatedAt: string): boolean {
   return age > 30 && lastActive > 30;
 }
 
+function sanitizeLanguage(lang: string): string {
+  return lang.replace(/[^a-zA-Z0-9\-\+#]/g, "").slice(0, 50);
+}
+
+function sanitizeKeyword(kw: string): string {
+  return kw.replace(/[^a-zA-Z0-9\s\-_\.]/g, "").slice(0, 100).trim();
+}
+
+function sanitizeOrgOrRepo(name: string): string {
+  return name.replace(/[^a-zA-Z0-9\-_\.\/]/g, "").slice(0, 100);
+}
+
+function isValidGitHubUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "github.com" && parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export { isValidGitHubUrl };
+
 export class GitHubClient {
   private octokit: Octokit;
 
@@ -50,8 +73,9 @@ export class GitHubClient {
   }
 
   async searchTopRepos(language: string, limit: number): Promise<RepoSummary[]> {
+    const safeLang = sanitizeLanguage(language);
     const { data } = await this.octokit.search.repos({
-      q: `language:${language} stars:>1000`,
+      q: `language:${safeLang} stars:>1000`,
       sort: "stars",
       order: "desc",
       per_page: limit,
@@ -67,7 +91,7 @@ export class GitHubClient {
   }
 
   async fetchRepoInfo(fullName: string): Promise<RepoSummary | null> {
-    const [owner, repo] = fullName.split("/");
+    const [owner, repo] = sanitizeOrgOrRepo(fullName).split("/");
     if (!owner || !repo) return null;
     try {
       const { data } = await this.octokit.repos.get({ owner, repo });
@@ -84,7 +108,7 @@ export class GitHubClient {
   }
 
   async fetchOpenIssues(fullName: string, perRepo: number): Promise<IssueData[]> {
-    const [owner, repo] = fullName.split("/");
+    const [owner, repo] = sanitizeOrgOrRepo(fullName).split("/");
     if (!owner || !repo) return [];
 
     try {
@@ -127,9 +151,10 @@ export class GitHubClient {
   }
 
   async fetchOrgRepos(org: string, limit: number, language?: string): Promise<RepoSummary[]> {
+    const safeOrg = sanitizeOrgOrRepo(org);
     try {
       const { data } = await this.octokit.repos.listForOrg({
-        org,
+        org: safeOrg,
         sort: "pushed",
         direction: "desc",
         per_page: Math.min(100, limit * (language ? 5 : 1)),
@@ -160,7 +185,10 @@ export class GitHubClient {
     label?: string
   ): Promise<IssueData[]> {
     try {
-      const q = `${keyword} in:title,body language:${language} is:issue is:open${label ? ` label:${label}` : ""}`;
+      const safeKeyword = sanitizeKeyword(keyword);
+      const safeLang = sanitizeLanguage(language);
+      const safeLabel = label ? sanitizeKeyword(label) : undefined;
+      const q = `${safeKeyword} in:title,body language:${safeLang} is:issue is:open${safeLabel ? ` label:${safeLabel}` : ""}`;
       const { data } = await this.octokit.search.issuesAndPullRequests({
         q,
         sort: "reactions",
