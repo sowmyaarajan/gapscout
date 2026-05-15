@@ -24,6 +24,29 @@ export interface RepoSummary {
   isAbandoned: boolean;
 }
 
+export interface RegistryPackage {
+  name: string;
+  monthlyDownloads: number;
+  url: string;
+}
+
+export interface RegistrySignal {
+  registry: "npm" | "pypi" | "crates.io" | "none";
+  topPackages: RegistryPackage[];
+  totalMonthlyDownloads: number;
+}
+
+export interface WorthBuildingScore {
+  overall: number;
+  demand: number;
+  marketSize: number;
+  urgency: number;
+  competition: number;
+  breadth: number;
+  verdict: "Strong opportunity" | "Promising" | "Niche" | "Saturated";
+  reasoning: string;
+}
+
 export interface Gap {
   theme: string;
   keywords: string[];
@@ -37,6 +60,8 @@ export interface Gap {
   avgAgeDays: number;
   avgParticipants: number;
   velocityScore: number;
+  registrySignal?: RegistrySignal;
+  worthBuilding?: WorthBuildingScore;
 }
 
 export interface IssueSearchResult {

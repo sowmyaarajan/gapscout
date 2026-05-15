@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { GitHubClient } from "./github.js";
 import { findGaps, analyzeRepo, filterIssues } from "./analyzer.js";
+import { enrichGapsWithRegistry } from "./registry.js";
 
 const token = process.env.GITHUB_TOKEN;
 if (!token) {
@@ -48,7 +49,8 @@ app.post("/api/find-gaps", async (c) => {
     const allIssues = (
       await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
     ).flat();
-    const gaps = findGaps(allIssues, repos, topGaps, language);
+    const rawGaps = findGaps(allIssues, repos, topGaps, language);
+    const gaps = await enrichGapsWithRegistry(rawGaps, language);
 
     return c.json({
       language,
@@ -230,6 +232,22 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer;margin-top:4px}
 .issue-link{display:flex;align-items:center;gap:8px;font-size:13px;color:#94a3b8;text-decoration:none;padding:6px 8px;border-radius:4px;transition:background .1s}
 .issue-link:hover{background:#334155;color:#e2e8f0}
 .reactions-badge{background:#0f172a;color:#fbbf24;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px;white-space:nowrap}
+.worth-building{margin:10px 0 8px;padding:10px 12px;background:#0f172a;border-radius:8px;border-left:3px solid #6366f1}
+.wb-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;margin-bottom:6px}
+.wb-badge.strong{background:#14532d;color:#86efac}
+.wb-badge.promising{background:#1e3a5f;color:#93c5fd}
+.wb-badge.niche{background:#3d2900;color:#fcd34d}
+.wb-badge.saturated{background:#1e1e2e;color:#64748b}
+.wb-score-num{font-size:13px;color:#94a3b8;margin-left:4px}
+.wb-reasoning{font-size:12px;color:#64748b;margin-top:4px;line-height:1.5}
+.wb-breakdown{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.wb-dim{display:flex;flex-direction:column;gap:2px;min-width:80px;flex:1}
+.wb-dim-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.05em}
+.wb-dim-bar-wrap{background:#1e293b;border-radius:3px;height:4px;overflow:hidden}
+.wb-dim-bar{height:4px;background:#6366f1;border-radius:3px;transition:width .3s}
+.wb-dim-val{font-size:11px;color:#94a3b8;font-weight:600}
+.registry-signal{margin-top:8px;font-size:12px;color:#475569;display:flex;align-items:center;gap:6px}
+.registry-signal strong{color:#64748b}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:10px 12px;border-bottom:2px solid #334155;color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 td{padding:10px 12px;border-bottom:1px solid #1e293b;vertical-align:top}
@@ -464,6 +482,25 @@ function renderGaps(containerId, data) {
     html += '<span class="meta-item">avg age <strong>' + gap.avgAgeDays + 'd</strong></span>';
     html += '<span class="meta-item">velocity <strong>' + gap.velocityScore + '</strong></span>';
     html += '</div>';
+    if (gap.worthBuilding) {
+      const wb = gap.worthBuilding;
+      const cls = wb.verdict === 'Strong opportunity' ? 'strong' : wb.verdict === 'Promising' ? 'promising' : wb.verdict === 'Niche' ? 'niche' : 'saturated';
+      html += '<div class="worth-building">';
+      html += '<div><span class="wb-badge ' + cls + '">⚡ ' + esc(wb.verdict) + '</span><span class="wb-score-num">' + wb.overall + '/100</span></div>';
+      html += '<div class="wb-reasoning">' + esc(wb.reasoning) + '</div>';
+      html += '<div class="wb-breakdown">';
+      [['Demand', wb.demand], ['Market', wb.marketSize], ['Urgency', wb.urgency], ['Competition', wb.competition], ['Breadth', wb.breadth]].forEach(function(d) {
+        html += '<div class="wb-dim"><div class="wb-dim-label">' + d[0] + '</div><div class="wb-dim-bar-wrap"><div class="wb-dim-bar" style="width:' + d[1] + '%"></div></div><div class="wb-dim-val">' + d[1] + '</div></div>';
+      });
+      html += '</div>';
+      if (gap.registrySignal && gap.registrySignal.registry !== 'none' && gap.registrySignal.totalMonthlyDownloads > 0) {
+        const rs = gap.registrySignal;
+        const dlFmt = rs.totalMonthlyDownloads >= 1000000 ? (rs.totalMonthlyDownloads/1000000).toFixed(1)+'M' : rs.totalMonthlyDownloads >= 1000 ? Math.round(rs.totalMonthlyDownloads/1000)+'k' : rs.totalMonthlyDownloads;
+        const pkgNames = rs.topPackages.slice(0,3).map(function(p){return esc(p.name);}).join(', ');
+        html += '<div class="registry-signal">📦 <strong>' + dlFmt + '</strong> downloads/mo via ' + esc(rs.registry) + (pkgNames ? ' (' + pkgNames + ')' : '') + '</div>';
+      }
+      html += '</div>';
+    }
     if (gap.keywords.length) {
       html += '<div class="keywords">' + gap.keywords.map(k => '<span class="kw-tag">' + esc(k) + '</span>').join('') + '</div>';
     }

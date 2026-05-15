@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { GitHubClient } from "./github.js";
 import { findGaps, analyzeRepo, filterIssues } from "./analyzer.js";
+import { enrichGapsWithRegistry } from "./registry.js";
 
 const token = process.env.GITHUB_TOKEN;
 if (!token) {
@@ -173,7 +174,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
     ).flat();
 
-    const gaps = findGaps(allIssues, repos, topGaps, language);
+    const rawGaps = findGaps(allIssues, repos, topGaps, language);
+    const gaps = await enrichGapsWithRegistry(rawGaps, language);
 
     return {
       content: [

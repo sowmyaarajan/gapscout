@@ -1,4 +1,4 @@
-import type { IssueData, RepoSummary, Gap, RepoAnalysis } from "./types.js";
+import type { IssueData, RepoSummary, Gap, RepoAnalysis, RegistrySignal, WorthBuildingScore } from "./types.js";
 
 const STOPWORDS = new Set([
   // English basics
@@ -286,6 +286,55 @@ export function filterIssues(
       return true;
     })
     .sort((a, b) => (b.reactions * 2 + b.ageDays * 0.1) - (a.reactions * 2 + a.ageDays * 0.1));
+}
+
+function buildReasoning(gap: Gap, registry: RegistrySignal | undefined, overall: number, demand: number, marketSize: number): string {
+  const parts: string[] = [];
+  if (demand >= 60) {
+    parts.push(`strong GitHub demand (${gap.totalReactions} reactions across ${gap.affectedRepos.length} repos)`);
+  } else if (demand >= 30) {
+    parts.push(`moderate GitHub demand (${gap.totalReactions} reactions)`);
+  }
+  if (registry && registry.totalMonthlyDownloads > 0) {
+    const dl = registry.totalMonthlyDownloads;
+    const dlStr = dl >= 1_000_000 ? (dl / 1_000_000).toFixed(1) + "M" : dl >= 1_000 ? (dl / 1_000).toFixed(0) + "k" : String(dl);
+    parts.push(`${dlStr} monthly downloads in ${registry.registry}`);
+  }
+  if (gap.avgAgeDays > 365) {
+    parts.push(`unresolved for ${Math.round(gap.avgAgeDays / 30)} months`);
+  }
+  if (gap.abandonedAlternatives.length > 0) {
+    parts.push(`${gap.abandonedAlternatives.length} abandoned alternative(s)`);
+  }
+  const verdict = overall >= 75 ? "strong opportunity" : overall >= 55 ? "promising gap" : overall >= 35 ? "niche area" : "saturated space";
+  const base = parts.length > 0 ? parts.join(", ") + " — " : "";
+  return `${base}${verdict}.`;
+}
+
+export function calcWorthBuilding(gap: Gap, registry?: RegistrySignal): WorthBuildingScore {
+  const demand = Math.min(100, Math.round(gap.gapScore / 5));
+
+  const dl = registry?.totalMonthlyDownloads ?? 0;
+  const marketSize = dl > 0 ? Math.min(100, Math.round(Math.log10(dl) * 14.3)) : 15;
+
+  const urgency = Math.min(100, Math.round(gap.avgAgeDays / 7.3));
+
+  const competition = Math.min(100, 50 + gap.abandonedAlternatives.length * 10);
+
+  const breadth = Math.min(100, gap.affectedRepos.length * 10);
+
+  const overall = Math.round(
+    demand * 0.35 + marketSize * 0.25 + urgency * 0.15 + competition * 0.15 + breadth * 0.10
+  );
+
+  const verdict: WorthBuildingScore["verdict"] =
+    overall >= 75 ? "Strong opportunity" :
+    overall >= 55 ? "Promising" :
+    overall >= 35 ? "Niche" : "Saturated";
+
+  const reasoning = buildReasoning(gap, registry, overall, demand, marketSize);
+
+  return { overall, demand, marketSize, urgency, competition, breadth, verdict, reasoning };
 }
 
 export function analyzeRepo(issues: IssueData[], repoInfo: RepoSummary): RepoAnalysis {
