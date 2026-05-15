@@ -46,6 +46,10 @@ function sanitizeLanguage(lang: string): string {
   return lang.replace(/[^a-zA-Z0-9\-\+#]/g, "").slice(0, 50);
 }
 
+function sanitizeTopic(topic: string): string {
+  return topic.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9\-]/g, "").slice(0, 50);
+}
+
 function sanitizeKeyword(kw: string): string {
   return kw.replace(/[^a-zA-Z0-9\s\-_\.]/g, "").slice(0, 100).trim();
 }
@@ -72,10 +76,16 @@ export class GitHubClient {
     this.octokit = new Octokit({ auth: token });
   }
 
-  async searchTopRepos(language: string, limit: number): Promise<RepoSummary[]> {
-    const safeLang = sanitizeLanguage(language);
+  async searchTopRepos(language: string, limit: number, topic?: string): Promise<RepoSummary[]> {
+    const safeLang = language ? sanitizeLanguage(language) : "";
+    const safeTopic = topic ? sanitizeTopic(topic) : "";
+    const parts: string[] = [];
+    if (safeLang) parts.push(`language:${safeLang}`);
+    if (safeTopic) parts.push(`topic:${safeTopic}`);
+    const starsThreshold = safeTopic && !safeLang ? "stars:>100" : "stars:>1000";
+    parts.push(starsThreshold);
     const { data } = await this.octokit.search.repos({
-      q: `language:${safeLang} stars:>1000`,
+      q: parts.join(" "),
       sort: "stars",
       order: "desc",
       per_page: limit,

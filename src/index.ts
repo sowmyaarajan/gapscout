@@ -51,8 +51,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "How many gaps to return. Default 10.",
             default: 10,
           },
+          topic: {
+            type: "string",
+            description: "Optional GitHub topic to narrow repos (e.g., 'machine-learning', 'agents', 'llm', 'web-scraping'). Can be combined with language or used alone.",
+          },
         },
-        required: ["language"],
+        required: [],
       },
     },
     {
@@ -104,8 +108,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Filter: issues with at least this many reactions.",
           },
+          topic: {
+            type: "string",
+            description: "Optional GitHub topic to narrow repo discovery (e.g., 'machine-learning', 'agents').",
+          },
         },
-        required: ["language"],
+        required: [],
       },
     },
     {
@@ -152,9 +160,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           language: { type: "string" },
+          topic: { type: "string", description: "Optional GitHub topic filter (e.g., 'machine-learning')." },
           repoLimit: { type: "number", default: 30 },
         },
-        required: ["language"],
+        required: [],
       },
     },
   ],
@@ -165,16 +174,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "find_gaps") {
     const language = String(args?.language ?? "");
+    const topic = args?.topic ? String(args.topic) : undefined;
     const repoLimit = Math.min(30, Math.max(5, Number(args?.repoLimit ?? 15)));
     const issuesPerRepo = Math.min(50, Math.max(10, Number(args?.issuesPerRepo ?? 30)));
     const topGaps = Math.min(25, Math.max(1, Number(args?.topGaps ?? 10)));
 
-    const repos = await github.searchTopRepos(language, repoLimit);
+    if (!language && !topic) return { content: [{ type: "text", text: "Provide at least a language or topic." }], isError: true };
+    const repos = await github.searchTopRepos(language, repoLimit, topic);
     const allIssues = (
       await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
     ).flat();
 
-    const rawGaps = findGaps(allIssues, repos, topGaps, language);
+    const rawGaps = findGaps(allIssues, repos, topGaps, language, false, topic);
     const gaps = await enrichGapsWithRegistry(rawGaps, language);
 
     return {
@@ -200,10 +211,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "search_issues") {
     const language = String(args?.language ?? "");
+    const topic = args?.topic ? String(args.topic) : undefined;
     const repoLimit = Math.min(30, Math.max(5, Number(args?.repoLimit ?? 15)));
     const issuesPerRepo = Math.min(50, Math.max(10, Number(args?.issuesPerRepo ?? 30)));
     const keyword = args?.keyword ? String(args.keyword) : undefined;
     const label = args?.label ? String(args.label) : undefined;
+
+    if (!language && !topic && !keyword) return { content: [{ type: "text", text: "Provide at least a language, topic, or keyword." }], isError: true };
 
     let allIssues;
     let reposSearched: number;
@@ -212,7 +226,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       allIssues = await github.searchIssuesByKeyword(language, keyword, repoLimit, label);
       reposSearched = new Set(allIssues.map((i) => i.repo)).size;
     } else {
-      const repos = await github.searchTopRepos(language, repoLimit);
+      const repos = await github.searchTopRepos(language, repoLimit, topic);
       reposSearched = repos.length;
       allIssues = (
         await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
@@ -316,8 +330,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "list_abandoned") {
     const language = String(args?.language ?? "");
+    const topic = args?.topic ? String(args.topic) : undefined;
     const repoLimit = Math.min(50, Math.max(5, Number(args?.repoLimit ?? 30)));
-    const repos = await github.searchTopRepos(language, repoLimit);
+    const repos = await github.searchTopRepos(language, repoLimit, topic);
     const abandoned = repos.filter((r) => r.isAbandoned);
 
     return {

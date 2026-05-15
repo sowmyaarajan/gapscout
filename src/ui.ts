@@ -41,19 +41,22 @@ app.post("/api/find-gaps", async (c) => {
   try {
     const body = await c.req.json();
     const language = String(body.language ?? "");
+    const topic = body.topic ? String(body.topic) : undefined;
     const repoLimit = Math.min(30, Math.max(5, Number(body.repoLimit ?? 15)));
     const issuesPerRepo = Math.min(50, Math.max(10, Number(body.issuesPerRepo ?? 30)));
     const topGaps = Math.min(25, Math.max(1, Number(body.topGaps ?? 10)));
 
-    const repos = await github.searchTopRepos(language, repoLimit);
+    if (!language && !topic) return c.json({ error: "Provide at least a language or topic." }, 400);
+    const repos = await github.searchTopRepos(language, repoLimit, topic);
     const allIssues = (
       await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
     ).flat();
-    const rawGaps = findGaps(allIssues, repos, topGaps, language);
+    const rawGaps = findGaps(allIssues, repos, topGaps, language, false, topic);
     const gaps = await enrichGapsWithRegistry(rawGaps, language);
 
     return c.json({
       language,
+      topic,
       reposAnalyzed: repos.length,
       issuesAnalyzed: allIssues.length,
       featureRequestsFound: allIssues.filter((i) => i.isFeatureRequest).length,
@@ -69,6 +72,7 @@ app.post("/api/search-issues", async (c) => {
   try {
     const body = await c.req.json();
     const language = String(body.language ?? "");
+    const topic = body.topic ? String(body.topic) : undefined;
     const repoLimit = Math.min(30, Math.max(5, Number(body.repoLimit ?? 15)));
     const issuesPerRepo = Math.min(50, Math.max(10, Number(body.issuesPerRepo ?? 30)));
     const keyword = body.keyword ? String(body.keyword) : undefined;
@@ -81,7 +85,7 @@ app.post("/api/search-issues", async (c) => {
       allIssues = await github.searchIssuesByKeyword(language, keyword, repoLimit, label);
       reposSearched = new Set(allIssues.map((i) => i.repo)).size;
     } else {
-      const repos = await github.searchTopRepos(language, repoLimit);
+      const repos = await github.searchTopRepos(language, repoLimit, topic);
       reposSearched = repos.length;
       allIssues = (
         await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
@@ -160,9 +164,11 @@ app.post("/api/analyze-org", async (c) => {
 
 app.get("/api/abandoned/:language", async (c) => {
   try {
-    const language = c.req.param("language");
+    const language = c.req.param("language") ?? "";
+    const topic = c.req.query("topic") || undefined;
     const repoLimit = Math.min(50, Math.max(5, Number(c.req.query("repoLimit") ?? 30)));
-    const repos = await github.searchTopRepos(language, repoLimit);
+    if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
+    const repos = await github.searchTopRepos(language, repoLimit, topic);
     const abandoned = repos.filter((r) => r.isAbandoned);
     return c.json({
       language,
@@ -305,7 +311,8 @@ a:hover{text-decoration:underline}
   <!-- FIND GAPS -->
   <div id="tab-find-gaps" class="tab-panel active">
     <div class="form-grid">
-      <div class="form-group"><label>Language *</label><input id="fg-lang" placeholder="python, rust, go…"/></div>
+      <div class="form-group"><label>Language</label><input id="fg-lang" placeholder="python, rust, typescript…"/></div>
+      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="fg-topic" placeholder="machine-learning, agents, llm…"/></div>
       <div class="form-group"><label>Repo Limit</label><input id="fg-repo-limit" type="number" value="15" min="5" max="30"/></div>
       <div class="form-group"><label>Issues Per Repo</label><input id="fg-issues-per-repo" type="number" value="30" min="10" max="50"/></div>
       <div class="form-group"><label>Top Gaps</label><input id="fg-top-gaps" type="number" value="10" min="1" max="25"/></div>
@@ -319,7 +326,8 @@ a:hover{text-decoration:underline}
   <!-- OPPORTUNITIES -->
   <div id="tab-opportunities" class="tab-panel">
     <div class="form-grid">
-      <div class="form-group"><label>Language *</label><input id="op-lang" placeholder="python, rust, go…"/></div>
+      <div class="form-group"><label>Language</label><input id="op-lang" placeholder="python, rust, go…"/></div>
+      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="op-topic" placeholder="machine-learning, agents…"/></div>
       <div class="form-group"><label>Max Participants</label><input id="op-max-participants" type="number" value="3" min="1" max="20"/></div>
       <div class="form-group"><label>Min Reactions</label><input id="op-min-reactions" type="number" value="5" min="0"/></div>
       <div class="form-group"><label>Min Age (days)</label><input id="op-min-age" type="number" value="30" min="0"/></div>
@@ -353,7 +361,8 @@ a:hover{text-decoration:underline}
   <!-- SEARCH ISSUES -->
   <div id="tab-search-issues" class="tab-panel">
     <div class="form-grid">
-      <div class="form-group"><label>Language *</label><input id="si-lang" placeholder="python, rust…"/></div>
+      <div class="form-group"><label>Language</label><input id="si-lang" placeholder="python, rust…"/></div>
+      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="si-topic" placeholder="machine-learning, agents…"/></div>
       <div class="form-group"><label>Keyword</label><input id="si-keyword" placeholder="async, memory…"/></div>
       <div class="form-group"><label>Label</label><input id="si-label" placeholder="enhancement…"/></div>
       <div class="form-group"><label>Min Age (days)</label><input id="si-min-age" type="number" placeholder="90"/></div>
@@ -384,7 +393,8 @@ a:hover{text-decoration:underline}
   <!-- ABANDONED REPOS -->
   <div id="tab-abandoned" class="tab-panel">
     <div class="form-grid">
-      <div class="form-group"><label>Language *</label><input id="ab-lang" placeholder="python, rust…"/></div>
+      <div class="form-group"><label>Language</label><input id="ab-lang" placeholder="python, rust…"/></div>
+      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="ab-topic" placeholder="machine-learning, agents…"/></div>
       <div class="form-group"><label>Repo Limit</label><input id="ab-repo-limit" type="number" value="30"/></div>
     </div>
     <button id="btn-ab" class="btn" onclick="runAbandoned()">Find Abandoned</button>
@@ -446,18 +456,21 @@ function resultsHeader(title, count) {
 async function runFindGaps() {
   clearError('fg');
   const lang = document.getElementById('fg-lang').value.trim();
-  if (!lang) { showError('fg','Language is required'); return; }
+  const topic = document.getElementById('fg-topic').value.trim();
+  if (!lang && !topic) { showError('fg','Provide a language or topic (e.g. python, machine-learning)'); return; }
   setLoading('fg', true);
   document.getElementById('fg-results').innerHTML = '';
   try {
+    const body = {
+      language: lang,
+      repoLimit: +document.getElementById('fg-repo-limit').value,
+      issuesPerRepo: +document.getElementById('fg-issues-per-repo').value,
+      topGaps: +document.getElementById('fg-top-gaps').value,
+    };
+    if (topic) body.topic = topic;
     const res = await fetch('/api/find-gaps', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        language: lang,
-        repoLimit: +document.getElementById('fg-repo-limit').value,
-        issuesPerRepo: +document.getElementById('fg-issues-per-repo').value,
-        topGaps: +document.getElementById('fg-top-gaps').value,
-      })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (data.error) { showError('fg', data.error); return; }
@@ -515,12 +528,14 @@ function renderGaps(containerId, data) {
 async function runSearchIssues() {
   clearError('si');
   const lang = document.getElementById('si-lang').value.trim();
-  if (!lang) { showError('si','Language is required'); return; }
+  const topic = document.getElementById('si-topic').value.trim();
+  const kw = document.getElementById('si-keyword').value.trim();
+  if (!lang && !topic && !kw) { showError('si','Provide a language, topic, or keyword'); return; }
   setLoading('si', true);
   document.getElementById('si-results').innerHTML = '';
   try {
     const body = { language: lang, repoLimit: +document.getElementById('si-repo-limit').value };
-    const kw = document.getElementById('si-keyword').value.trim();
+    if (topic) body.topic = topic;
     const label = document.getElementById('si-label').value.trim();
     const minAge = document.getElementById('si-min-age').value;
     const maxAge = document.getElementById('si-max-age').value;
@@ -648,12 +663,14 @@ function renderRepoAnalysis(containerId, d) {
 async function runAbandoned() {
   clearError('ab');
   const lang = document.getElementById('ab-lang').value.trim();
-  if (!lang) { showError('ab','Language is required'); return; }
+  const topic = document.getElementById('ab-topic').value.trim();
+  if (!lang && !topic) { showError('ab','Provide a language or topic'); return; }
   setLoading('ab', true);
   document.getElementById('ab-results').innerHTML = '';
   try {
     const repoLimit = document.getElementById('ab-repo-limit').value;
-    const res = await fetch('/api/abandoned/' + encodeURIComponent(lang) + '?repoLimit=' + repoLimit);
+    const topicParam = topic ? '&topic=' + encodeURIComponent(topic) : '';
+    const res = await fetch('/api/abandoned/' + encodeURIComponent(lang) + '?repoLimit=' + repoLimit + topicParam);
     const data = await res.json();
     if (data.error) { showError('ab', data.error); return; }
     lastResult = data;
@@ -692,19 +709,22 @@ let opportunities = [];
 async function runOpportunities() {
   clearError('op');
   const lang = document.getElementById('op-lang').value.trim();
-  if (!lang) { showError('op','Language is required'); return; }
+  const topic = document.getElementById('op-topic').value.trim();
+  if (!lang && !topic) { showError('op','Provide a language or topic'); return; }
   setLoading('op', true);
   document.getElementById('op-cards').innerHTML = '';
   try {
+    const opBody = {
+      language: lang,
+      maxParticipants: +document.getElementById('op-max-participants').value || 3,
+      minReactions:    +document.getElementById('op-min-reactions').value || 5,
+      minAgeDays:      +document.getElementById('op-min-age').value || 30,
+      repoLimit: 15, issuesPerRepo: 50,
+    };
+    if (topic) opBody.topic = topic;
     const res = await fetch('/api/search-issues', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        language: lang,
-        maxParticipants: +document.getElementById('op-max-participants').value || 3,
-        minReactions:    +document.getElementById('op-min-reactions').value || 5,
-        minAgeDays:      +document.getElementById('op-min-age').value || 30,
-        repoLimit: 15, issuesPerRepo: 50,
-      })
+      body: JSON.stringify(opBody)
     });
     const data = await res.json();
     if (data.error) { showError('op', data.error); return; }

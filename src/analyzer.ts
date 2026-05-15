@@ -35,6 +35,10 @@ const STOPWORDS = new Set([
   "recent", "latest", "would", "should", "could", "make", "made",
   "feat", "implementation", "implement", "tracking", "track", "proposal",
   "rfc", "discussion", "todo", "task", "tasks", "milestone", "roadmap",
+  // Programming language names (too generic to be themes)
+  "python", "javascript", "typescript", "golang", "ruby", "java", "swift",
+  "kotlin", "scala", "haskell", "elixir", "clojure", "perl", "bash", "shell",
+  "csharp", "dotnet", "rust", // rust excluded here too since it commonly appears in non-rust topic searches
   // URL / markdown fragments
   "https", "http", "com", "org", "net",
   "www", "html", "blob", "tree", "master", "main", "branch",
@@ -198,11 +202,12 @@ export function findGaps(
   repos: RepoSummary[],
   topGaps: number,
   language?: string,
-  singleRepoMode = false
+  singleRepoMode = false,
+  topic?: string
 ): Gap[] {
-  const excludeTerms = language
-    ? new Set(language.toLowerCase().split(/\s+/))
-    : undefined;
+  const excludeTerms = new Set<string>();
+  if (language) language.toLowerCase().split(/\s+/).forEach(w => excludeTerms.add(w));
+  if (topic) topic.toLowerCase().replace(/-/g, " ").split(/\s+/).forEach(w => excludeTerms.add(w));
 
   const featureRequests = issues.filter((i) => i.isFeatureRequest);
   const pool = featureRequests.length >= 20 ? featureRequests : issues;
