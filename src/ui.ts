@@ -491,15 +491,15 @@ a:hover{text-decoration:underline}
       <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px;text-transform:none;letter-spacing:0">(optional)</span></label><input id="fg-topic" placeholder="machine-learning, agents, llm…" onkeydown="if(event.key==='Enter')runGapsSearch()"/></div>
       <div><button id="btn-fg" class="btn" onclick="runGapsSearch()">Search</button></div>
     </div>
-    <div id="fg-spinner" class="spinner">Counting issues on GitHub…</div>
+    <div id="fg-spinner" class="spinner">Searching GitHub…</div>
     <div id="fg-error" class="error-box"></div>
     <div id="fg-count-section" style="display:none;margin-top:8px">
       <div id="fg-count-display" class="issue-count-display"></div>
       <div class="timeframe-bar">
         <span style="font-size:13px;color:#64748b;margin-right:4px">Trending:</span>
-        <button class="tf-btn" onclick="loadTrending('daily',this)">Daily — Top 20</button>
-        <button class="tf-btn" onclick="loadTrending('weekly',this)">Weekly — Top 30</button>
-        <button class="tf-btn" onclick="loadTrending('monthly',this)">Monthly — Top 50</button>
+        <button class="tf-btn" id="tf-daily" onclick="loadTrending('daily',this)">Daily — Top 20</button>
+        <button class="tf-btn" id="tf-weekly" onclick="loadTrending('weekly',this)">Weekly — Top 30</button>
+        <button class="tf-btn" id="tf-monthly" onclick="loadTrending('monthly',this)">Monthly — Top 50</button>
       </div>
       <div id="fg-trending-spinner" class="spinner" style="display:none">Loading trending issues…</div>
     </div>
@@ -911,7 +911,8 @@ async function runGapsSearch() {
     document.getElementById('fg-count-display').innerHTML =
       'Found <span>' + data.totalCount.toLocaleString() + '</span> open issues on GitHub';
     document.getElementById('fg-count-section').style.display = 'block';
-    document.querySelectorAll('.tf-btn').forEach(function(b) { b.classList.remove('active'); });
+    // auto-load weekly by default
+    loadTrending('weekly', document.getElementById('tf-weekly'));
   } catch(e) { showError('fg', e.message); }
   finally { setLoading('fg', false); }
 }
