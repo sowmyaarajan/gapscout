@@ -445,7 +445,7 @@ a:hover{text-decoration:underline}
 </header>
 
 <!-- SETTINGS OVERLAY -->
-<div id="settings-overlay" class="settings-overlay">
+<div id="settings-overlay" class="settings-overlay" style="display:none">
   <div class="settings-panel">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
       <h3 style="font-size:16px;font-weight:700;color:#f1f5f9">AI Settings</h3>
@@ -1020,11 +1020,11 @@ function openSettings() {
   document.getElementById('ai-key').value = s.apiKey || '';
   document.getElementById('ai-model').value = s.model || PROVIDER_MODELS[s.provider || 'claude'];
   document.getElementById('settings-saved').style.display = 'none';
-  document.getElementById('settings-overlay').classList.add('open');
+  document.getElementById('settings-overlay').style.display = 'flex';
 }
 
 function closeSettings() {
-  document.getElementById('settings-overlay').classList.remove('open');
+  document.getElementById('settings-overlay').style.display = 'none';
 }
 
 function onProviderChange() {
