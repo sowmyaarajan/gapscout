@@ -186,6 +186,111 @@ app.get("/api/abandoned/:language", async (c) => {
   }
 });
 
+app.get("/api/count-issues", async (c) => {
+  try {
+    const language = c.req.query("language") ?? "";
+    const topic = c.req.query("topic") ?? "";
+    if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
+    const totalCount = await github.countIssues(language, topic || undefined);
+    return c.json({ totalCount });
+  } catch (e: any) {
+    return safeError(e, "count-issues");
+  }
+});
+
+app.post("/api/trending-issues", async (c) => {
+  try {
+    const body = await c.req.json();
+    const language = String(body.language ?? "");
+    const topic = body.topic ? String(body.topic) : undefined;
+    const tf = body.timeframe;
+    const timeframe: "daily" | "weekly" | "monthly" =
+      tf === "daily" || tf === "weekly" || tf === "monthly" ? tf : "weekly";
+    const limits = { daily: 20, weekly: 30, monthly: 50 };
+    if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
+    const issues = await github.fetchTrendingIssues(language, topic, timeframe, limits[timeframe]);
+    return c.json({ issues, timeframe, totalShown: issues.length });
+  } catch (e: any) {
+    return safeError(e, "trending-issues");
+  }
+});
+
+app.post("/api/analyse", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { apiKey, provider, model, repo, issueTitle, issueBody, labels } = body;
+    if (!apiKey || !provider || !repo || !issueTitle) {
+      return c.json({ error: "Missing required fields." }, 400);
+    }
+
+    const meta = await github.fetchRepoMeta(String(repo));
+
+    const prompt =
+      `You are a developer assistant. Analyse this GitHub issue concisely.\n\n` +
+      `Repo: ${repo}\n` +
+      `Repo description: ${meta.description || "Not available"}\n` +
+      `Languages: ${meta.languages.length ? meta.languages.join(", ") : "Not available"}\n` +
+      `Issue title: ${issueTitle}\n` +
+      `Issue body: ${String(issueBody ?? "").slice(0, 500)}\n` +
+      `Labels: ${(labels ?? []).join(", ") || "None"}\n\n` +
+      `Reply in exactly this format:\n` +
+      `**Product:** [1-2 sentences on what this repo does]\n` +
+      `**Languages:** [comma-separated list]\n` +
+      `**Issue Summary:** [2-3 sentences on the problem and what solving it would require]`;
+
+    let summary = "";
+
+    if (provider === "claude") {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": String(apiKey),
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: String(model || "claude-sonnet-4-6"),
+          max_tokens: 400,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const data: any = await res.json();
+      if (!res.ok) return c.json({ error: data.error?.message ?? "Claude API error" }, 400);
+      summary = data.content?.[0]?.text ?? "";
+    } else if (provider === "openai" || provider === "openrouter") {
+      const baseUrl =
+        provider === "openrouter"
+          ? "https://openrouter.ai/api/v1"
+          : "https://api.openai.com/v1";
+      const defaultModel = provider === "openrouter" ? "deepseek/deepseek-chat" : "gpt-4o";
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          ...(provider === "openrouter"
+            ? { "HTTP-Referer": "https://github.com/sowmyaarajan/gapscout" }
+            : {}),
+        },
+        body: JSON.stringify({
+          model: String(model || defaultModel),
+          max_tokens: 400,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const data: any = await res.json();
+      if (!res.ok) return c.json({ error: data.error?.message ?? "API error" }, 400);
+      summary = data.choices?.[0]?.message?.content ?? "";
+    } else {
+      return c.json({ error: "Unknown provider." }, 400);
+    }
+
+    return c.json({ summary });
+  } catch (e: any) {
+    return safeError(e, "analyse");
+  }
+});
+
 app.get("/", (c) => c.html(DASHBOARD_HTML));
 
 const DASHBOARD_HTML = `<!DOCTYPE html>
@@ -305,14 +410,70 @@ a:hover{text-decoration:underline}
 .repo-stat{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 16px;text-align:center}
 .repo-stat-value{font-size:22px;font-weight:700;color:#f1f5f9;font-family:'JetBrains Mono',monospace}
 .repo-stat-label{font-size:11px;color:#64748b;margin-top:2px}
+.search-bar{display:flex;gap:16px;align-items:flex-end;margin-bottom:20px;flex-wrap:wrap}
+.search-bar .form-group{flex:1;min-width:160px}
+.issue-count-display{font-size:26px;font-weight:800;color:#f1f5f9;margin-bottom:16px}
+.issue-count-display span{color:#3b82f6;font-family:'JetBrains Mono',monospace}
+.timeframe-bar{display:flex;gap:8px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.tf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+.tf-btn:hover{background:#334155;color:#e2e8f0;border-color:#6366f1}
+.tf-btn.active{background:#4f46e5;border-color:#4f46e5;color:#fff}
+.trend-card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:10px}
+.trend-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
+.trend-card-title{font-size:14px;font-weight:600;color:#f1f5f9;line-height:1.4;flex:1;text-decoration:none}
+.trend-card-title:hover{color:#60a5fa;text-decoration:none}
+.trend-card-meta{display:flex;gap:12px;font-size:12px;color:#64748b;flex-wrap:wrap;margin-bottom:10px;align-items:center}
+.btn-analyse{background:#7c3aed;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;white-space:nowrap}
+.btn-analyse:hover:not(:disabled){background:#6d28d9}
+.btn-analyse:disabled{background:#334155;color:#64748b;cursor:default}
+.analysis-box{margin-top:12px;padding:12px 14px;background:#0f172a;border-radius:8px;border-left:3px solid #7c3aed;font-size:13px;color:#94a3b8;line-height:1.7;display:none}
+.analysis-box.show{display:block}
+.analysis-box strong{color:#c4b5fd}
+.settings-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;align-items:center;justify-content:center}
+.settings-overlay.open{display:flex}
+.settings-panel{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:460px;max-width:92vw}
+.btn-settings{margin-left:auto;background:transparent;border:1px solid #334155;color:#94a3b8;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
+.btn-settings:hover{border-color:#6366f1;color:#a5b4fc}
 </style>
 </head>
 <body>
 <header>
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
   <h1>GapScout</h1>
-  <span>v0.2.0</span>
+  <span>v0.3.0</span>
+  <button class="btn-settings" onclick="openSettings()">&#9881; AI Settings</button>
 </header>
+
+<!-- SETTINGS OVERLAY -->
+<div id="settings-overlay" class="settings-overlay">
+  <div class="settings-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <h3 style="font-size:16px;font-weight:700;color:#f1f5f9">AI Settings</h3>
+      <button onclick="closeSettings()" style="background:none;border:none;color:#94a3b8;font-size:20px;cursor:pointer;line-height:1">&#x2715;</button>
+    </div>
+    <div class="form-group" style="margin-bottom:16px">
+      <label>Provider</label>
+      <select id="ai-provider" onchange="onProviderChange()">
+        <option value="claude">Claude (Anthropic)</option>
+        <option value="openai">OpenAI</option>
+        <option value="openrouter">OpenRouter (DeepSeek / any model)</option>
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:16px">
+      <label>API Key</label>
+      <input id="ai-key" type="password" placeholder="Enter your API key…"/>
+    </div>
+    <div class="form-group" style="margin-bottom:24px">
+      <label>Model <span style="color:#475569;font-size:11px;text-transform:none;letter-spacing:0">(editable)</span></label>
+      <input id="ai-model" placeholder="claude-sonnet-4-6"/>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn" onclick="saveSettings()">Save</button>
+      <button class="btn btn-sm" onclick="closeSettings()">Cancel</button>
+      <span id="settings-saved" style="display:none;color:#4ade80;font-size:13px;margin-left:8px">&#10003; Saved</span>
+    </div>
+  </div>
+</div>
 <div class="container">
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('find-gaps')">Find Gaps</button>
@@ -323,19 +484,26 @@ a:hover{text-decoration:underline}
     <button class="tab-btn" onclick="switchTab('abandoned')">Abandoned Repos</button>
   </div>
 
-  <!-- FIND GAPS -->
+  <!-- FIND GAPS (REDESIGNED) -->
   <div id="tab-find-gaps" class="tab-panel active">
-    <div class="form-grid">
-      <div class="form-group"><label>Language</label><input id="fg-lang" placeholder="python, rust, typescript…"/></div>
-      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="fg-topic" placeholder="machine-learning, agents, llm…"/></div>
-      <div class="form-group"><label>Repo Limit</label><input id="fg-repo-limit" type="number" value="15" min="5" max="30"/></div>
-      <div class="form-group"><label>Issues Per Repo</label><input id="fg-issues-per-repo" type="number" value="30" min="10" max="50"/></div>
-      <div class="form-group"><label>Top Gaps</label><input id="fg-top-gaps" type="number" value="10" min="1" max="25"/></div>
+    <div class="search-bar">
+      <div class="form-group"><label>Language</label><input id="fg-lang" placeholder="python, rust, typescript…" onkeydown="if(event.key==='Enter')runGapsSearch()"/></div>
+      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px;text-transform:none;letter-spacing:0">(optional)</span></label><input id="fg-topic" placeholder="machine-learning, agents, llm…" onkeydown="if(event.key==='Enter')runGapsSearch()"/></div>
+      <div><button id="btn-fg" class="btn" onclick="runGapsSearch()">Search</button></div>
     </div>
-    <button id="btn-fg" class="btn" onclick="runFindGaps()">Find Gaps</button>
-    <div id="fg-spinner" class="spinner">Analyzing GitHub repos…</div>
+    <div id="fg-spinner" class="spinner">Counting issues on GitHub…</div>
     <div id="fg-error" class="error-box"></div>
-    <div id="fg-results" style="margin-top:24px"></div>
+    <div id="fg-count-section" style="display:none;margin-top:8px">
+      <div id="fg-count-display" class="issue-count-display"></div>
+      <div class="timeframe-bar">
+        <span style="font-size:13px;color:#64748b;margin-right:4px">Trending:</span>
+        <button class="tf-btn" onclick="loadTrending('daily',this)">Daily — Top 20</button>
+        <button class="tf-btn" onclick="loadTrending('weekly',this)">Weekly — Top 30</button>
+        <button class="tf-btn" onclick="loadTrending('monthly',this)">Monthly — Top 50</button>
+      </div>
+      <div id="fg-trending-spinner" class="spinner" style="display:none">Loading trending issues…</div>
+    </div>
+    <div id="fg-results" style="margin-top:8px"></div>
   </div>
 
   <!-- OPPORTUNITIES -->
@@ -718,33 +886,160 @@ function downloadReport() {
   URL.revokeObjectURL(url);
 }
 
-async function runFindGaps() {
+// ── FIND GAPS — 3-STEP FLOW ─────────────────────────────────────
+var _trendingLang = '';
+var _trendingTopic = '';
+var _trendingIssues = [];
+
+async function runGapsSearch() {
   clearError('fg');
   const lang = document.getElementById('fg-lang').value.trim();
   const topic = document.getElementById('fg-topic').value.trim();
-  if (!lang && !topic) { showError('fg','Provide a language or topic (e.g. python, machine-learning)'); return; }
+  if (!lang && !topic) { showError('fg', 'Provide a language or topic (e.g. python, machine-learning)'); return; }
+  _trendingLang = lang;
+  _trendingTopic = topic;
   setLoading('fg', true);
+  document.getElementById('fg-count-section').style.display = 'none';
   document.getElementById('fg-results').innerHTML = '';
   try {
-    const body = {
-      language: lang,
-      repoLimit: +document.getElementById('fg-repo-limit').value,
-      issuesPerRepo: +document.getElementById('fg-issues-per-repo').value,
-      topGaps: +document.getElementById('fg-top-gaps').value,
-    };
-    if (topic) body.topic = topic;
-    const res = await fetch('/api/find-gaps', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body)
-    });
+    const params = new URLSearchParams();
+    if (lang) params.set('language', lang);
+    if (topic) params.set('topic', topic);
+    const res = await fetch('/api/count-issues?' + params.toString());
     const data = await res.json();
     if (data.error) { showError('fg', data.error); return; }
-    lastResult = data;
-    lastSearchType = 'gaps';
-    lastSearchLabel = lang || topic || 'search';
-    renderGaps('fg-results', data);
+    document.getElementById('fg-count-display').innerHTML =
+      'Found <span>' + data.totalCount.toLocaleString() + '</span> open issues on GitHub';
+    document.getElementById('fg-count-section').style.display = 'block';
+    document.querySelectorAll('.tf-btn').forEach(function(b) { b.classList.remove('active'); });
   } catch(e) { showError('fg', e.message); }
   finally { setLoading('fg', false); }
+}
+
+async function loadTrending(timeframe, btn) {
+  document.querySelectorAll('.tf-btn').forEach(function(b) { b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  const spinner = document.getElementById('fg-trending-spinner');
+  spinner.style.display = 'block';
+  document.getElementById('fg-results').innerHTML = '';
+  try {
+    const res = await fetch('/api/trending-issues', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: _trendingLang, topic: _trendingTopic, timeframe: timeframe }),
+    });
+    const data = await res.json();
+    if (data.error) { showError('fg', data.error); spinner.style.display = 'none'; return; }
+    lastResult = data;
+    lastSearchType = 'issues';
+    lastSearchLabel = _trendingLang || _trendingTopic || 'search';
+    _trendingIssues = data.issues || [];
+    renderTrendingIssues(_trendingIssues, timeframe);
+  } catch(e) { showError('fg', e.message); }
+  finally { spinner.style.display = 'none'; }
+}
+
+function renderTrendingIssues(issues, timeframe) {
+  const el = document.getElementById('fg-results');
+  if (!issues || !issues.length) {
+    el.innerHTML = '<p style="color:#64748b">No trending issues found for this timeframe. Try Weekly or Monthly.</p>';
+    return;
+  }
+  const label = timeframe === 'daily' ? 'today' : timeframe === 'weekly' ? 'this week' : 'this month';
+  const aiSettings = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
+  const hasKey = !!aiSettings.apiKey;
+  var html = '<p style="color:#64748b;font-size:13px;margin-bottom:16px">Top ' + issues.length + ' issues trending ' + label + ' · sorted by reactions</p>';
+  issues.forEach(function(issue, idx) {
+    html += '<div class="trend-card" id="tc-' + idx + '">';
+    html += '<div class="trend-card-header">';
+    html += '<a class="trend-card-title" href="' + safeUrl(issue.url) + '" target="_blank">' + esc(issue.title.slice(0, 100)) + '</a>';
+    if (hasKey) {
+      html += '<button class="btn-analyse" onclick="analyseIssue(' + idx + ', this)">Analyse</button>';
+    } else {
+      html += '<button class="btn-analyse" disabled title="Configure AI key in &#9881; AI Settings">Analyse</button>';
+    }
+    html += '</div>';
+    html += '<div class="trend-card-meta">';
+    html += '<span style="font-family:monospace;font-size:11px;color:#3b82f6">' + esc(issue.repo) + '</span>';
+    html += '<span>&#128077; ' + issue.reactions + '</span>';
+    html += '<span>&#128336; ' + issue.ageDays + 'd old</span>';
+    html += '<span>&#128172; ' + issue.comments + '</span>';
+    if (issue.isStale) html += '<span class="stale-badge">stale</span>';
+    var labelTags = (issue.labels || []).slice(0, 3).map(function(l) { return '<span class="label-tag">' + esc(l) + '</span>'; }).join('');
+    if (labelTags) html += labelTags;
+    html += '</div>';
+    html += '<div class="analysis-box" id="abox-' + idx + '"></div>';
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+async function analyseIssue(idx, btn) {
+  const issue = _trendingIssues[idx];
+  if (!issue) return;
+  const aiSettings = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
+  if (!aiSettings.apiKey) { alert('Please configure your AI key in ⚙ AI Settings first.'); return; }
+  btn.textContent = 'Analysing…';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/analyse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: aiSettings.apiKey,
+        provider: aiSettings.provider || 'claude',
+        model: aiSettings.model || '',
+        repo: issue.repo,
+        issueTitle: issue.title,
+        issueBody: issue.body || '',
+        labels: issue.labels || [],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) { btn.textContent = 'Analyse'; btn.disabled = false; alert('Error: ' + data.error); return; }
+    const box = document.getElementById('abox-' + idx);
+    box.innerHTML = data.summary
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>');
+    box.classList.add('show');
+    btn.textContent = 'Analysed ✓';
+  } catch(e) {
+    btn.textContent = 'Analyse';
+    btn.disabled = false;
+    alert('Analysis failed: ' + e.message);
+  }
+}
+
+// ── AI SETTINGS ─────────────────────────────────────────────────
+var PROVIDER_MODELS = { claude: 'claude-sonnet-4-6', openai: 'gpt-4o', openrouter: 'deepseek/deepseek-chat' };
+
+function openSettings() {
+  const s = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
+  document.getElementById('ai-provider').value = s.provider || 'claude';
+  document.getElementById('ai-key').value = s.apiKey || '';
+  document.getElementById('ai-model').value = s.model || PROVIDER_MODELS[s.provider || 'claude'];
+  document.getElementById('settings-saved').style.display = 'none';
+  document.getElementById('settings-overlay').classList.add('open');
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+
+function onProviderChange() {
+  const p = document.getElementById('ai-provider').value;
+  document.getElementById('ai-model').value = PROVIDER_MODELS[p] || '';
+}
+
+function saveSettings() {
+  const settings = {
+    provider: document.getElementById('ai-provider').value,
+    apiKey: document.getElementById('ai-key').value.trim(),
+    model: document.getElementById('ai-model').value.trim(),
+  };
+  localStorage.setItem('gapscout-ai-settings', JSON.stringify(settings));
+  document.getElementById('settings-saved').style.display = 'inline';
+  setTimeout(closeSettings, 1200);
 }
 
 function renderGaps(containerId, data) {

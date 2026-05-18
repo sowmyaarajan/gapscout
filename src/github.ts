@@ -205,37 +205,107 @@ export class GitHubClient {
         order: "desc",
         per_page: Math.min(repoLimit * 10, 100),
       });
-
-      return data.items
-        .filter((i: any) => !i.pull_request)
-        .map((i: any) => {
-          const labels: string[] = (i.labels ?? [])
-            .map((l: any) => (typeof l === "string" ? l : l.name ?? ""))
-            .filter(Boolean);
-          const repoFullName: string = (i.repository_url as string).replace(
-            "https://api.github.com/repos/",
-            ""
-          );
-          return {
-            repo: repoFullName,
-            number: i.number,
-            title: i.title,
-            body: (i.body ?? "").slice(0, 500),
-            labels,
-            reactions: i.reactions?.total_count ?? 0,
-            comments: i.comments ?? 0,
-            createdAt: i.created_at,
-            url: i.html_url,
-            isFeatureRequest: isFeatureRequest(i.title, labels),
-            assignees: (i.assignees ?? []).length,
-            lastActivityAt: i.updated_at,
-            ageDays: calcAgeDays(i.created_at),
-            isStale: calcIsStale(i.created_at, i.updated_at),
-            participantCount: Math.min(i.comments ?? 0, 20),
-          };
-        });
+      return this.mapSearchItems(data.items);
     } catch {
       return [];
     }
+  }
+
+  async countIssues(language: string, topic?: string): Promise<number> {
+    try {
+      const parts = ["is:issue", "is:open"];
+      if (language) parts.push(`language:${sanitizeLanguage(language)}`);
+      if (topic) parts.push(sanitizeTopic(topic).replace(/-/g, " "));
+      const { data } = await this.octokit.search.issuesAndPullRequests({
+        q: parts.join(" "),
+        per_page: 1,
+      });
+      return data.total_count;
+    } catch {
+      return 0;
+    }
+  }
+
+  async fetchTrendingIssues(
+    language: string,
+    topic: string | undefined,
+    timeframe: "daily" | "weekly" | "monthly",
+    limit: number
+  ): Promise<IssueData[]> {
+    try {
+      const days = timeframe === "daily" ? 1 : timeframe === "weekly" ? 7 : 30;
+      const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+      let q: string;
+      if (topic && !language) {
+        const repos = await this.searchTopRepos("", 10, topic);
+        const repoQ = repos.slice(0, 8).map((r) => `repo:${r.fullName}`).join(" ");
+        if (!repoQ) return [];
+        q = `${repoQ} is:issue is:open updated:>=${since}`;
+      } else {
+        const parts = ["is:issue", "is:open", `updated:>=${since}`];
+        if (language) parts.push(`language:${sanitizeLanguage(language)}`);
+        if (topic) parts.push(sanitizeTopic(topic).replace(/-/g, " "));
+        q = parts.join(" ");
+      }
+
+      const { data } = await this.octokit.search.issuesAndPullRequests({
+        q,
+        sort: "reactions",
+        order: "desc",
+        per_page: Math.min(limit, 50),
+      });
+      return this.mapSearchItems(data.items);
+    } catch {
+      return [];
+    }
+  }
+
+  async fetchRepoMeta(fullName: string): Promise<{ description: string; languages: string[] }> {
+    const [owner, repo] = sanitizeOrgOrRepo(fullName).split("/");
+    if (!owner || !repo) return { description: "", languages: [] };
+    try {
+      const [repoData, langsData] = await Promise.all([
+        this.octokit.repos.get({ owner, repo }),
+        this.octokit.repos.listLanguages({ owner, repo }),
+      ]);
+      return {
+        description: repoData.data.description ?? "",
+        languages: Object.keys(langsData.data),
+      };
+    } catch {
+      return { description: "", languages: [] };
+    }
+  }
+
+  private mapSearchItems(items: any[]): IssueData[] {
+    return items
+      .filter((i: any) => !i.pull_request)
+      .map((i: any) => {
+        const labels: string[] = (i.labels ?? [])
+          .map((l: any) => (typeof l === "string" ? l : l.name ?? ""))
+          .filter(Boolean);
+        const repoFullName: string = (i.repository_url as string).replace(
+          "https://api.github.com/repos/",
+          ""
+        );
+        return {
+          repo: repoFullName,
+          number: i.number,
+          title: i.title,
+          body: (i.body ?? "").slice(0, 500),
+          labels,
+          reactions: i.reactions?.total_count ?? 0,
+          comments: i.comments ?? 0,
+          createdAt: i.created_at,
+          url: i.html_url,
+          isFeatureRequest: isFeatureRequest(i.title, labels),
+          assignees: (i.assignees ?? []).length,
+          lastActivityAt: i.updated_at,
+          ageDays: calcAgeDays(i.created_at),
+          isStale: calcIsStale(i.created_at, i.updated_at),
+          participantCount: Math.min(i.comments ?? 0, 20),
+        };
+      });
   }
 }
