@@ -254,6 +254,21 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer;margin-top:4px}
 .wb-dim-val{font-size:11px;color:#94a3b8;font-weight:600}
 .registry-signal{margin-top:8px;font-size:12px;color:#475569;display:flex;align-items:center;gap:6px}
 .registry-signal strong{color:#64748b}
+.insights-panel{background:linear-gradient(135deg,#1e1b4b,#1e293b);border:1px solid #4f46e5;border-radius:12px;padding:20px 24px;margin-bottom:20px}
+.insights-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.insights-title{font-size:12px;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.08em}
+.insights-stats{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px}
+.insights-stat-val{font-size:26px;font-weight:800;color:#a5b4fc;font-family:'JetBrains Mono',monospace;display:block}
+.insights-stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
+.insights-top{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}
+.insights-row{display:flex;align-items:center;gap:10px;font-size:13px}
+.insights-rank{color:#6366f1;font-weight:700;width:18px;flex-shrink:0}
+.insights-label{color:#e2e8f0;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.insights-meta{font-size:11px;color:#64748b;white-space:nowrap}
+.insights-takeaway{font-size:12px;color:#94a3b8;border-top:1px solid #334155;padding-top:10px;line-height:1.6}
+.insights-takeaway strong{color:#c4b5fd}
+.btn-report{background:transparent;border:1px solid #4f46e5;color:#a5b4fc;font-size:11px;font-weight:600;padding:5px 12px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.btn-report:hover{background:#4f46e5;color:#fff}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:10px 12px;border-bottom:2px solid #334155;color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 td{padding:10px 12px;border-bottom:1px solid #1e293b;vertical-align:top}
@@ -406,6 +421,8 @@ a:hover{text-decoration:underline}
 
 <script>
 let lastResult = null;
+let lastSearchType = '';
+let lastSearchLabel = '';
 
 const TAB_IDS = ['find-gaps','opportunities','search-issues','analyze-repo','organization','abandoned'];
 
@@ -453,6 +470,254 @@ function resultsHeader(title, count) {
     + '<button class="btn btn-sm" onclick="doExport()">Export JSON</button></div>';
 }
 
+function stat(val, label) {
+  return '<div><span class="insights-stat-val">' + val + '</span><span class="insights-stat-label">' + label + '</span></div>';
+}
+
+function renderSummaryPanel(data, type, searchLabel) {
+  var html = '<div class="insights-panel">';
+  html += '<div class="insights-header"><span class="insights-title">Key Insights — ' + esc(searchLabel) + '</span>';
+  html += '<button class="btn-report" onclick="downloadReport()">&#11015; Download Report</button></div>';
+  html += '<div class="insights-stats">';
+  if (type === 'gaps') {
+    html += stat(data.reposAnalyzed || 0, 'Repos');
+    html += stat((data.issuesAnalyzed || 0).toLocaleString(), 'Issues');
+    html += stat(data.featureRequestsFound || 0, 'Feature Reqs');
+    html += stat((data.gaps || []).length, 'Gaps Found');
+    html += '</div>';
+    var top3 = (data.gaps || []).slice(0, 3);
+    if (top3.length) {
+      html += '<div class="insights-top">';
+      top3.forEach(function(g, i) {
+        var cls = g.worthBuilding ? (g.worthBuilding.verdict === 'Strong opportunity' ? 'strong' : g.worthBuilding.verdict === 'Promising' ? 'promising' : g.worthBuilding.verdict === 'Niche' ? 'niche' : 'saturated') : '';
+        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(g.theme) + '</span>';
+        if (g.worthBuilding) html += '<span class="wb-badge ' + cls + ' insights-meta">' + esc(g.worthBuilding.verdict) + '</span>';
+        html += '<span class="insights-meta">score ' + g.gapScore + '</span></div>';
+      });
+      html += '</div>';
+      var best = top3[0];
+      var takeaway = best.worthBuilding ? best.worthBuilding.reasoning : (best.issueCount + ' issues, ' + best.totalReactions + ' reactions');
+      html += '<div class="insights-takeaway">Strongest gap: <strong>' + esc(best.theme) + '</strong> — ' + esc(takeaway) + '</div>';
+    }
+  } else if (type === 'opportunities' || type === 'issues') {
+    html += stat(data.reposSearched || data.reposAnalyzed || 0, 'Repos');
+    html += stat(data.totalFound || (data.issues || []).length, 'Found');
+    html += '</div>';
+    var top3 = (data.issues || []).slice(0, 3);
+    if (top3.length) {
+      html += '<div class="insights-top">';
+      top3.forEach(function(issue, i) {
+        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(issue.title.slice(0,60)) + '</span><span class="insights-meta">&#128077; ' + issue.reactions + ' · ' + issue.ageDays + 'd</span></div>';
+      });
+      html += '</div>';
+      var best = top3[0];
+      html += '<div class="insights-takeaway">Most in-demand: <strong>' + esc(best.title.slice(0,60)) + '</strong> — ' + best.reactions + ' reactions, open ' + best.ageDays + ' days</div>';
+    }
+  } else if (type === 'repo') {
+    html += stat((data.stars || 0).toLocaleString(), 'Stars');
+    html += stat(data.openIssues || 0, 'Open Issues');
+    html += stat((data.staleIssues || []).length, 'Stale');
+    html += stat((data.gaps || []).length, 'Clusters');
+    html += '</div>';
+    var top3 = (data.topIssues || []).slice(0, 3);
+    if (top3.length) {
+      html += '<div class="insights-top">';
+      top3.forEach(function(issue, i) {
+        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(issue.title.slice(0,60)) + '</span><span class="insights-meta">&#128077; ' + issue.reactions + '</span></div>';
+      });
+      html += '</div>';
+      var best = top3[0];
+      html += '<div class="insights-takeaway">Most requested: <strong>' + esc(best.title.slice(0,60)) + '</strong> — ' + best.reactions + ' reactions</div>';
+    }
+  } else if (type === 'org') {
+    html += stat(data.reposFound || 0, 'Repos');
+    html += stat((data.issuesAnalyzed || 0).toLocaleString(), 'Issues');
+    html += stat((data.gaps || []).length, 'Gaps');
+    html += stat((data.abandonedRepos || []).length, 'Abandoned');
+    html += '</div>';
+    var top3 = (data.gaps || []).slice(0, 3);
+    if (top3.length) {
+      html += '<div class="insights-top">';
+      top3.forEach(function(g, i) {
+        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(g.theme) + '</span><span class="insights-meta">score ' + Math.round(g.gapScore) + '</span></div>';
+      });
+      html += '</div>';
+      var best = top3[0];
+      var takeaway = best.worthBuilding ? best.worthBuilding.reasoning : (best.issueCount + ' issues across ' + best.affectedRepos.length + ' repos');
+      html += '<div class="insights-takeaway">Strongest gap: <strong>' + esc(best.theme) + '</strong> — ' + esc(takeaway) + '</div>';
+    }
+  } else if (type === 'abandoned') {
+    html += stat(data.reposChecked || 0, 'Checked');
+    html += stat(data.abandonedCount || 0, 'Abandoned');
+    html += '</div>';
+    var top3 = (data.abandoned || []).slice(0, 3);
+    if (top3.length) {
+      html += '<div class="insights-top">';
+      top3.forEach(function(r, i) {
+        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(r.repo) + '</span><span class="insights-meta">&#11088; ' + (r.stars||0).toLocaleString() + '</span></div>';
+      });
+      html += '</div>';
+      var best = top3[0];
+      html += '<div class="insights-takeaway">Most popular abandoned: <strong>' + esc(best.repo) + '</strong> — ' + (best.stars||0).toLocaleString() + ' stars, last active ' + new Date(best.lastPushed).toLocaleDateString() + '</div>';
+    }
+  }
+  html += '</div>';
+  return html;
+}
+
+function generateHtmlReport(data, type, searchLabel) {
+  var date = new Date().toLocaleDateString('en-US', {year:'numeric',month:'long',day:'numeric'});
+  var css = 'body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:0}'
+    + 'header{background:#1e1b4b;border-bottom:1px solid #4f46e5;padding:20px 40px;display:flex;align-items:center;gap:16px}'
+    + 'header h1{font-size:22px;font-weight:800;color:#a5b4fc;margin:0}'
+    + 'header .sub{font-size:13px;color:#64748b}'
+    + '.container{max-width:1100px;margin:0 auto;padding:32px 40px}'
+    + '.summary-box{background:linear-gradient(135deg,#1e1b4b,#1e293b);border:1px solid #4f46e5;border-radius:12px;padding:24px;margin-bottom:28px}'
+    + '.summary-box h2{font-size:14px;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.08em;margin:0 0 16px}'
+    + '.stat-grid{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px}'
+    + '.stat-box{text-align:center}'
+    + '.stat-val{font-size:28px;font-weight:800;color:#a5b4fc;font-family:monospace;display:block}'
+    + '.stat-lbl{font-size:11px;color:#64748b;text-transform:uppercase}'
+    + '.section{margin-bottom:28px}'
+    + '.section h2{font-size:15px;font-weight:700;color:#94a3b8;border-bottom:1px solid #1e293b;padding-bottom:8px;margin-bottom:16px}'
+    + '.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:12px}'
+    + '.card-title{font-size:16px;font-weight:700;color:#f1f5f9;font-family:monospace;margin-bottom:8px}'
+    + '.meta{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:#64748b;margin-bottom:8px}'
+    + '.badge-strong{background:#14532d;color:#86efac;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
+    + '.badge-promising{background:#1e3a5f;color:#93c5fd;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
+    + '.badge-niche{background:#3d2900;color:#fcd34d;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
+    + '.badge-saturated{background:#1e1e2e;color:#64748b;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
+    + 'table{width:100%;border-collapse:collapse;font-size:13px}'
+    + 'th{text-align:left;padding:10px 12px;border-bottom:2px solid #334155;color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase}'
+    + 'td{padding:10px 12px;border-bottom:1px solid #1e293b;vertical-align:top}'
+    + 'a{color:#60a5fa;text-decoration:none}'
+    + '.stale{background:#451a03;color:#fb923c;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px}'
+    + 'footer{border-top:1px solid #1e293b;padding:20px 40px;text-align:center;font-size:12px;color:#475569}';
+
+  var esc2 = function(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+  var safeHref = function(url) {
+    try { var p = new URL(url); return (p.hostname === 'github.com' && p.protocol === 'https:') ? esc2(url) : '#'; } catch(e) { return '#'; }
+  };
+
+  var body = '';
+  body += '<div class="summary-box"><h2>Executive Summary</h2><div class="stat-grid">';
+  if (type === 'gaps') {
+    body += '<div class="stat-box"><span class="stat-val">' + (data.reposAnalyzed||0) + '</span><span class="stat-lbl">Repos</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.issuesAnalyzed||0).toLocaleString() + '</span><span class="stat-lbl">Issues</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.featureRequestsFound||0) + '</span><span class="stat-lbl">Feature Reqs</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.gaps||[]).length + '</span><span class="stat-lbl">Gaps</span></div>';
+  } else if (type === 'opportunities' || type === 'issues') {
+    body += '<div class="stat-box"><span class="stat-val">' + (data.reposSearched||0) + '</span><span class="stat-lbl">Repos</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.totalFound||0) + '</span><span class="stat-lbl">Issues Found</span></div>';
+  } else if (type === 'repo') {
+    body += '<div class="stat-box"><span class="stat-val">' + (data.stars||0).toLocaleString() + '</span><span class="stat-lbl">Stars</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.openIssues||0) + '</span><span class="stat-lbl">Open Issues</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.staleIssues||[]).length + '</span><span class="stat-lbl">Stale</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.gaps||[]).length + '</span><span class="stat-lbl">Gap Clusters</span></div>';
+  } else if (type === 'org') {
+    body += '<div class="stat-box"><span class="stat-val">' + (data.reposFound||0) + '</span><span class="stat-lbl">Repos</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.issuesAnalyzed||0).toLocaleString() + '</span><span class="stat-lbl">Issues</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.gaps||[]).length + '</span><span class="stat-lbl">Gaps</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.abandonedRepos||[]).length + '</span><span class="stat-lbl">Abandoned</span></div>';
+  } else if (type === 'abandoned') {
+    body += '<div class="stat-box"><span class="stat-val">' + (data.reposChecked||0) + '</span><span class="stat-lbl">Checked</span></div>';
+    body += '<div class="stat-box"><span class="stat-val">' + (data.abandonedCount||0) + '</span><span class="stat-lbl">Abandoned</span></div>';
+  }
+  body += '</div></div>';
+
+  if (type === 'gaps' || type === 'org') {
+    if (data.gaps && data.gaps.length) {
+      body += '<div class="section"><h2>Gap Analysis</h2>';
+      data.gaps.forEach(function(gap) {
+        var wb = gap.worthBuilding;
+        var vcls = wb ? (wb.verdict === 'Strong opportunity' ? 'badge-strong' : wb.verdict === 'Promising' ? 'badge-promising' : wb.verdict === 'Niche' ? 'badge-niche' : 'badge-saturated') : '';
+        body += '<div class="card"><div class="card-title">' + esc2(gap.theme) + (wb ? ' <span class="' + vcls + '">' + esc2(wb.verdict) + '</span> <span style="color:#94a3b8;font-size:13px">' + wb.overall + '/100</span>' : '') + '</div>';
+        body += '<div class="meta"><span>' + gap.issueCount + ' issues</span><span>' + gap.totalReactions + ' reactions</span><span>' + (gap.affectedRepos||[]).length + ' repos</span><span>avg ' + gap.avgAgeDays + 'd old</span></div>';
+        if (wb) body += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">' + esc2(wb.reasoning) + '</div>';
+        if (gap.registrySignal && gap.registrySignal.totalMonthlyDownloads > 0) {
+          var dl = gap.registrySignal.totalMonthlyDownloads;
+          var dlStr = dl >= 1000000 ? (dl/1000000).toFixed(1)+'M' : dl >= 1000 ? Math.round(dl/1000)+'k' : String(dl);
+          body += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">&#128230; ' + dlStr + ' downloads/mo via ' + esc2(gap.registrySignal.registry) + '</div>';
+        }
+        if (gap.sampleIssues && gap.sampleIssues.length) {
+          body += '<div style="font-size:12px;color:#94a3b8;margin-top:8px;margin-bottom:4px">Sample issues:</div>';
+          gap.sampleIssues.forEach(function(i) {
+            body += '<div style="padding:3px 0"><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,90)) + '</a> <span style="color:#64748b">&#128077; ' + i.reactions + '</span></div>';
+          });
+        }
+        body += '</div>';
+      });
+      body += '</div>';
+    }
+    if (type === 'org' && data.repos && data.repos.length) {
+      body += '<div class="section"><h2>Repositories</h2><table><thead><tr><th>Repo</th><th>Stars</th><th>Open Issues</th><th>Last Pushed</th><th>Status</th></tr></thead><tbody>';
+      data.repos.forEach(function(r) {
+        var d = r.lastPushed ? new Date(r.lastPushed).toLocaleDateString() : 'N/A';
+        body += '<tr><td><a href="https://github.com/' + esc2(r.fullName) + '">' + esc2(r.fullName) + '</a></td><td>' + (r.stars||0).toLocaleString() + '</td><td>' + (r.openIssues||0) + '</td><td>' + d + '</td><td>' + (r.isAbandoned ? '<span class="stale">abandoned</span>' : 'active') + '</td></tr>';
+      });
+      body += '</tbody></table></div>';
+    }
+  } else if (type === 'opportunities' || type === 'issues') {
+    if (data.issues && data.issues.length) {
+      body += '<div class="section"><h2>Issues</h2><table><thead><tr><th>Repo</th><th>Title</th><th>Age</th><th>Reactions</th><th>Participants</th></tr></thead><tbody>';
+      data.issues.forEach(function(i) {
+        body += '<tr><td style="font-family:monospace;font-size:11px">' + esc2(i.repo) + '</td><td><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,80)) + '</a>' + (i.isStale ? ' <span class="stale">stale</span>' : '') + '</td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td><td>' + i.participantCount + '</td></tr>';
+      });
+      body += '</tbody></table></div>';
+    }
+  } else if (type === 'repo') {
+    if (data.topIssues && data.topIssues.length) {
+      body += '<div class="section"><h2>Top Issues by Demand</h2><table><thead><tr><th>Title</th><th>Reactions</th><th>Age</th></tr></thead><tbody>';
+      data.topIssues.forEach(function(i) {
+        body += '<tr><td><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,90)) + '</a></td><td>' + i.reactions + '</td><td>' + i.ageDays + 'd</td></tr>';
+      });
+      body += '</tbody></table></div>';
+    }
+    if (data.staleIssues && data.staleIssues.length) {
+      body += '<div class="section"><h2>Stale Issues</h2><table><thead><tr><th>Title</th><th>Age</th><th>Reactions</th></tr></thead><tbody>';
+      data.staleIssues.slice(0,20).forEach(function(i) {
+        body += '<tr><td><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,80)) + '</a></td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td></tr>';
+      });
+      body += '</tbody></table></div>';
+    }
+    if (data.gaps && data.gaps.length) {
+      body += '<div class="section"><h2>Gap Clusters</h2>';
+      data.gaps.forEach(function(gap) {
+        body += '<div class="card"><div class="card-title">' + esc2(gap.theme) + '</div>';
+        body += '<div class="meta"><span>' + gap.issueCount + ' issues</span><span>' + gap.totalReactions + ' reactions</span></div></div>';
+      });
+      body += '</div>';
+    }
+  } else if (type === 'abandoned') {
+    if (data.abandoned && data.abandoned.length) {
+      body += '<div class="section"><h2>Abandoned Repositories</h2><table><thead><tr><th>Repo</th><th>Stars</th><th>Last Pushed</th><th>Open Issues</th></tr></thead><tbody>';
+      data.abandoned.forEach(function(r) {
+        var d = new Date(r.lastPushed).toLocaleDateString();
+        body += '<tr><td><a href="https://github.com/' + esc2(r.repo) + '">' + esc2(r.repo) + '</a></td><td>' + (r.stars||0).toLocaleString() + '</td><td>' + d + '</td><td>' + r.openIssues + '</td></tr>';
+      });
+      body += '</tbody></table></div>';
+    }
+  }
+
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>GapScout Report — ' + esc2(searchLabel) + '</title><style>' + css + '</style></head>'
+    + '<body><header><h1>GapScout</h1><div class="sub">' + esc2(searchLabel) + ' · Generated ' + date + '</div></header>'
+    + '<div class="container">' + body + '</div>'
+    + '<footer>Generated by GapScout · github.com/sowmyaarajan/gapscout</footer></body></html>';
+}
+
+function downloadReport() {
+  if (!lastResult) return;
+  var html = generateHtmlReport(lastResult, lastSearchType, lastSearchLabel);
+  var blob = new Blob([html], {type: 'text/html'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  var slug = lastSearchLabel.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 40);
+  a.download = 'gapscout-' + slug + '-' + new Date().toISOString().slice(0, 10) + '.html';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function runFindGaps() {
   clearError('fg');
   const lang = document.getElementById('fg-lang').value.trim();
@@ -475,6 +740,8 @@ async function runFindGaps() {
     const data = await res.json();
     if (data.error) { showError('fg', data.error); return; }
     lastResult = data;
+    lastSearchType = 'gaps';
+    lastSearchLabel = lang || topic || 'search';
     renderGaps('fg-results', data);
   } catch(e) { showError('fg', e.message); }
   finally { setLoading('fg', false); }
@@ -483,7 +750,8 @@ async function runFindGaps() {
 function renderGaps(containerId, data) {
   const el = document.getElementById(containerId);
   if (!data.gaps || !data.gaps.length) { el.innerHTML = '<p style="color:#64748b">No gaps found.</p>'; return; }
-  let html = resultsHeader('Gaps Found', data.gaps.length);
+  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
+  html += resultsHeader('Gaps Found', data.gaps.length);
   html += '<p style="color:#64748b;font-size:13px;margin-bottom:16px">Analyzed ' + data.reposAnalyzed + ' repos · ' + data.issuesAnalyzed + ' issues · ' + data.featureRequestsFound + ' feature requests</p>';
   for (const gap of data.gaps) {
     html += '<div class="gap-card">';
@@ -555,6 +823,8 @@ async function runSearchIssues() {
     const data = await res.json();
     if (data.error) { showError('si', data.error); return; }
     lastResult = data;
+    lastSearchType = 'issues';
+    lastSearchLabel = [lang, topic, kw].filter(Boolean).join(' ') || 'search';
     renderIssuesTable('si-results', data);
   } catch(e) { showError('si', e.message); }
   finally { setLoading('si', false); }
@@ -563,7 +833,8 @@ async function runSearchIssues() {
 function renderIssuesTable(containerId, data) {
   const el = document.getElementById(containerId);
   if (!data.issues || !data.issues.length) { el.innerHTML = '<p style="color:#64748b">No issues found matching filters.</p>'; return; }
-  let html = resultsHeader('Issues Found', data.totalFound);
+  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
+  html += resultsHeader('Issues Found', data.totalFound);
   html += '<table><thead><tr><th>Repo</th><th>Title</th><th>Age</th><th>Reactions</th><th>Participants</th><th>Labels</th></tr></thead><tbody>';
   for (const i of data.issues) {
     html += '<tr>';
@@ -593,6 +864,8 @@ async function runAnalyzeRepo() {
     const data = await res.json();
     if (data.error) { showError('ar', data.error); return; }
     lastResult = data;
+    lastSearchType = 'repo';
+    lastSearchLabel = repo;
     renderRepoAnalysis('ar-results', data);
   } catch(e) { showError('ar', e.message); }
   finally { setLoading('ar', false); }
@@ -600,7 +873,8 @@ async function runAnalyzeRepo() {
 
 function renderRepoAnalysis(containerId, d) {
   const el = document.getElementById(containerId);
-  let html = '<div class="results-header"><h3>' + esc(d.repo) + '</h3><button class="btn btn-sm" onclick="doExport()">Export JSON</button></div>';
+  let html = renderSummaryPanel(d, lastSearchType, lastSearchLabel);
+  html += '<div class="results-header"><h3>' + esc(d.repo) + '</h3><button class="btn btn-sm" onclick="doExport()">Export JSON</button></div>';
   html += '<div class="repo-info">';
   html += '<div class="repo-stat"><div class="repo-stat-value">' + (d.stars||0).toLocaleString() + '</div><div class="repo-stat-label">Stars</div></div>';
   html += '<div class="repo-stat"><div class="repo-stat-value">' + (d.openIssues||0).toLocaleString() + '</div><div class="repo-stat-label">Open Issues</div></div>';
@@ -674,6 +948,8 @@ async function runAbandoned() {
     const data = await res.json();
     if (data.error) { showError('ab', data.error); return; }
     lastResult = data;
+    lastSearchType = 'abandoned';
+    lastSearchLabel = lang || topic || 'repos';
     renderAbandoned('ab-results', data);
   } catch(e) { showError('ab', e.message); }
   finally { setLoading('ab', false); }
@@ -682,7 +958,8 @@ async function runAbandoned() {
 function renderAbandoned(containerId, data) {
   const el = document.getElementById(containerId);
   if (!data.abandoned || !data.abandoned.length) { el.innerHTML = '<p style="color:#64748b">No abandoned repos found in top ' + data.reposChecked + '.</p>'; return; }
-  let html = resultsHeader('Abandoned Repos', data.abandonedCount);
+  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
+  html += resultsHeader('Abandoned Repos', data.abandonedCount);
   html += '<table><thead><tr><th>Repo</th><th>Stars</th><th>Last Pushed</th><th>Open Issues</th></tr></thead><tbody>';
   for (const r of data.abandoned) {
     const d = new Date(r.lastPushed).toLocaleDateString();
@@ -730,6 +1007,8 @@ async function runOpportunities() {
     if (data.error) { showError('op', data.error); return; }
     lastResult = data;
     opportunities = data.issues || [];
+    lastSearchType = 'opportunities';
+    lastSearchLabel = lang || topic || 'search';
     renderOpportunityCards();
     renderPickedIssues();
   } catch(e) { showError('op', e.message); }
@@ -750,7 +1029,8 @@ function renderOpportunityCards() {
   if (!opportunities.length) { el.innerHTML = '<p style="color:#64748b">No opportunities found. Try lowering Min Reactions or Min Age.</p>'; return; }
   const picked = JSON.parse(localStorage.getItem('gapscout-picked') || '[]');
   const pickedUrls = new Set(picked.map(function(p) { return p.url; }));
-  let html = '<p style="color:#64748b;font-size:13px;margin-bottom:16px">' + opportunities.length + ' opportunities found</p>';
+  let html = renderSummaryPanel(lastResult || {reposSearched:0,totalFound:opportunities.length,issues:opportunities}, lastSearchType, lastSearchLabel);
+  html += '<p style="color:#64748b;font-size:13px;margin-bottom:16px">' + opportunities.length + ' opportunities found</p>';
   opportunities.slice(0, 25).forEach(function(issue, idx) {
     const isPickedUp = pickedUrls.has(issue.url);
     html += '<div class="opp-card">';
@@ -834,6 +1114,8 @@ async function runOrgAnalysis() {
     const data = await res.json();
     if (data.error) { showError('og', data.error); return; }
     lastResult = data;
+    lastSearchType = 'org';
+    lastSearchLabel = org;
     renderOrgAnalysis('og-results', data);
   } catch(e) { showError('og', e.message); }
   finally { setLoading('og', false); }
@@ -841,7 +1123,8 @@ async function runOrgAnalysis() {
 
 function renderOrgAnalysis(containerId, data) {
   const el = document.getElementById(containerId);
-  let html = resultsHeader(esc(data.org) + ' Organization', data.reposFound + ' repos');
+  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
+  html += resultsHeader(esc(data.org) + ' Organization', data.reposFound + ' repos');
   html += '<div class="repo-info">';
   html += '<div class="repo-stat"><div class="repo-stat-value">' + (data.reposFound||0) + '</div><div class="repo-stat-label">Repos</div></div>';
   html += '<div class="repo-stat"><div class="repo-stat-value">' + (data.issuesAnalyzed||0).toLocaleString() + '</div><div class="repo-stat-label">Issues</div></div>';
