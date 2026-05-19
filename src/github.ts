@@ -1,5 +1,5 @@
 import { Octokit } from "@octokit/rest";
-import type { IssueData, RepoSummary } from "./types.js";
+import type { IssueData, RepoSummary, TrendingRepo, OrgInfo, OrgTopic } from "./types.js";
 
 const FEATURE_REQUEST_HINTS = [
   "feature request",
@@ -275,6 +275,168 @@ export class GitHubClient {
       };
     } catch {
       return { description: "", languages: [] };
+    }
+  }
+
+  async countRepos(language: string, topic?: string): Promise<number> {
+    try {
+      const parts: string[] = [];
+      if (language) parts.push(`language:${sanitizeLanguage(language)}`);
+      if (topic) parts.push(`topic:${sanitizeTopic(topic)}`);
+      if (!parts.length) return 0;
+      const { data } = await this.octokit.search.repos({
+        q: parts.join(" "),
+        per_page: 1,
+      });
+      return data.total_count;
+    } catch {
+      return 0;
+    }
+  }
+
+  async fetchTrendingRepos(
+    language: string,
+    topic: string | undefined,
+    timeframe: "daily" | "weekly" | "monthly",
+    limit: number
+  ): Promise<TrendingRepo[]> {
+    try {
+      const days = timeframe === "daily" ? 1 : timeframe === "weekly" ? 7 : 30;
+      const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+      const parts: string[] = [`pushed:>=${since}`];
+      if (language) parts.push(`language:${sanitizeLanguage(language)}`);
+      if (topic) parts.push(`topic:${sanitizeTopic(topic)}`);
+      if (parts.length === 1) {
+        // recency-only is too broad; constrain by stars to keep the result list useful
+        parts.push("stars:>50");
+      }
+
+      const { data } = await this.octokit.search.repos({
+        q: parts.join(" "),
+        sort: "stars",
+        order: "desc",
+        per_page: Math.min(limit, 50),
+        // octokit types declare these as static literals — cast loosely
+        mediaType: { previews: ["mercy"] } as any,
+      });
+
+      return data.items.map((r: any) => ({
+        fullName: r.full_name,
+        description: r.description ?? "",
+        language: r.language ?? "",
+        stars: r.stargazers_count ?? 0,
+        openIssues: r.open_issues_count ?? 0,
+        createdAt: r.created_at ?? "",
+        pushedAt: r.pushed_at ?? "",
+        ageDays: r.created_at ? calcAgeDays(r.created_at) : 0,
+        topics: Array.isArray(r.topics) ? r.topics : [],
+        htmlUrl: r.html_url ?? "",
+        avatarUrl: r.owner?.avatar_url ?? "",
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  async fetchOrgInfo(org: string): Promise<OrgInfo | null> {
+    const safeOrg = sanitizeOrgOrRepo(org);
+    if (!safeOrg) return null;
+    try {
+      const { data } = await this.octokit.orgs.get({ org: safeOrg });
+      return {
+        login: data.login,
+        name: data.name ?? data.login,
+        description: data.description ?? "",
+        blog: data.blog ?? "",
+        htmlUrl: data.html_url,
+        avatarUrl: data.avatar_url,
+        publicRepos: data.public_repos ?? 0,
+        createdAt: data.created_at,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async fetchOrgTopTopics(
+    org: string,
+    topicFilter: string | undefined,
+    topN: number
+  ): Promise<OrgTopic[]> {
+    const safeOrg = sanitizeOrgOrRepo(org);
+    if (!safeOrg) return [];
+    const filter = topicFilter ? sanitizeTopic(topicFilter) : "";
+    try {
+      // Pull up to 100 most recently pushed repos for the org.
+      const { data: repos } = await this.octokit.repos.listForOrg({
+        org: safeOrg,
+        sort: "pushed",
+        direction: "desc",
+        per_page: 100,
+        type: "public",
+        mediaType: { previews: ["mercy"] } as any,
+      });
+
+      const agg = new Map<
+        string,
+        {
+          repoCount: number;
+          totalStars: number;
+          totalOpenIssues: number;
+          languages: Set<string>;
+          repos: { fullName: string; stars: number; description: string; htmlUrl: string }[];
+        }
+      >();
+
+      for (const r of repos) {
+        const topics: string[] = Array.isArray((r as any).topics) ? (r as any).topics : [];
+        if (!topics.length) continue;
+        for (const t of topics) {
+          if (filter && t !== filter) continue;
+          let entry = agg.get(t);
+          if (!entry) {
+            entry = {
+              repoCount: 0,
+              totalStars: 0,
+              totalOpenIssues: 0,
+              languages: new Set<string>(),
+              repos: [],
+            };
+            agg.set(t, entry);
+          }
+          entry.repoCount++;
+          entry.totalStars += r.stargazers_count ?? 0;
+          entry.totalOpenIssues += r.open_issues_count ?? 0;
+          if (r.language) entry.languages.add(r.language);
+          entry.repos.push({
+            fullName: r.full_name,
+            stars: r.stargazers_count ?? 0,
+            description: r.description ?? "",
+            htmlUrl: r.html_url,
+          });
+        }
+      }
+
+      const scored: { topic: string; score: number; entry: any }[] = [];
+      for (const [topic, entry] of agg.entries()) {
+        const score = entry.repoCount * Math.log10(entry.totalStars + 10);
+        scored.push({ topic, score, entry });
+      }
+      scored.sort((a, b) => b.score - a.score);
+
+      return scored.slice(0, topN).map((s) => ({
+        name: s.topic,
+        repoCount: s.entry.repoCount,
+        totalStars: s.entry.totalStars,
+        totalOpenIssues: s.entry.totalOpenIssues,
+        languages: Array.from(s.entry.languages).slice(0, 8) as string[],
+        sampleRepos: s.entry.repos
+          .sort((a: any, b: any) => b.stars - a.stars)
+          .slice(0, 5),
+      }));
+    } catch {
+      return [];
     }
   }
 

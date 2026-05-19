@@ -24,6 +24,40 @@ export interface RepoSummary {
   isAbandoned: boolean;
 }
 
+export interface TrendingRepo {
+  fullName: string;
+  description: string;
+  language: string;
+  stars: number;
+  openIssues: number;
+  createdAt: string;
+  pushedAt: string;
+  ageDays: number;
+  topics: string[];
+  htmlUrl: string;
+  avatarUrl: string;
+}
+
+export interface OrgInfo {
+  login: string;
+  name: string;
+  description: string;
+  blog: string;
+  htmlUrl: string;
+  avatarUrl: string;
+  publicRepos: number;
+  createdAt: string;
+}
+
+export interface OrgTopic {
+  name: string;
+  repoCount: number;
+  totalStars: number;
+  totalOpenIssues: number;
+  languages: string[];
+  sampleRepos: { fullName: string; stars: number; description: string; htmlUrl: string }[];
+}
+
 export interface RegistryPackage {
   name: string;
   monthlyDownloads: number;

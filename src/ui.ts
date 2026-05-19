@@ -3,8 +3,6 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { GitHubClient } from "./github.js";
-import { findGaps, analyzeRepo, filterIssues } from "./analyzer.js";
-import { enrichGapsWithRegistry } from "./registry.js";
 
 const token = process.env.GITHUB_TOKEN;
 if (!token) {
@@ -29,162 +27,10 @@ app.use("*", async (c, next) => {
   await next();
 });
 
-function safeError(e: any, context: string): Response {
+function safeError(e: any, context: string) {
   console.error(`[GapScout] ${context}:`, e?.message ?? e);
-  return new Response(JSON.stringify({ error: "Request failed. Check server logs." }), {
-    status: 500,
-    headers: { "Content-Type": "application/json" },
-  });
+  return { error: "Request failed. Check server logs." };
 }
-
-app.post("/api/find-gaps", async (c) => {
-  try {
-    const body = await c.req.json();
-    const language = String(body.language ?? "");
-    const topic = body.topic ? String(body.topic) : undefined;
-    const repoLimit = Math.min(30, Math.max(5, Number(body.repoLimit ?? 15)));
-    const issuesPerRepo = Math.min(50, Math.max(10, Number(body.issuesPerRepo ?? 30)));
-    const topGaps = Math.min(25, Math.max(1, Number(body.topGaps ?? 10)));
-
-    if (!language && !topic) return c.json({ error: "Provide at least a language or topic." }, 400);
-    const repos = await github.searchTopRepos(language, repoLimit, topic);
-    const allIssues = (
-      await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
-    ).flat();
-    const rawGaps = findGaps(allIssues, repos, topGaps, language, false, topic);
-    const gaps = await enrichGapsWithRegistry(rawGaps, language);
-
-    return c.json({
-      language,
-      topic,
-      reposAnalyzed: repos.length,
-      issuesAnalyzed: allIssues.length,
-      featureRequestsFound: allIssues.filter((i) => i.isFeatureRequest).length,
-      abandonedRepos: repos.filter((r) => r.isAbandoned).map((r) => r.fullName),
-      gaps,
-    });
-  } catch (e: any) {
-    return safeError(e, "API error");
-  }
-});
-
-app.post("/api/search-issues", async (c) => {
-  try {
-    const body = await c.req.json();
-    const language = String(body.language ?? "");
-    const topic = body.topic ? String(body.topic) : undefined;
-    const repoLimit = Math.min(30, Math.max(5, Number(body.repoLimit ?? 15)));
-    const issuesPerRepo = Math.min(50, Math.max(10, Number(body.issuesPerRepo ?? 30)));
-    const keyword = body.keyword ? String(body.keyword) : undefined;
-    const label = body.label ? String(body.label) : undefined;
-
-    let allIssues;
-    let reposSearched: number;
-
-    if (keyword) {
-      allIssues = await github.searchIssuesByKeyword(language, keyword, repoLimit, label);
-      reposSearched = new Set(allIssues.map((i) => i.repo)).size;
-    } else {
-      const repos = await github.searchTopRepos(language, repoLimit, topic);
-      reposSearched = repos.length;
-      allIssues = (
-        await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
-      ).flat();
-    }
-
-    const filters = {
-      keyword,
-      minAgeDays: body.minAgeDays ? Number(body.minAgeDays) : undefined,
-      maxAgeDays: body.maxAgeDays ? Number(body.maxAgeDays) : undefined,
-      isStale: body.isStale === true,
-      label,
-      maxParticipants: body.maxParticipants ? Number(body.maxParticipants) : undefined,
-      minReactions: body.minReactions ? Number(body.minReactions) : undefined,
-    };
-
-    const filtered = filterIssues(allIssues, filters);
-    return c.json({ language, reposSearched, totalFound: filtered.length, filters, issues: filtered.slice(0, 50) });
-  } catch (e: any) {
-    return safeError(e, "API error");
-  }
-});
-
-app.post("/api/analyze-repo", async (c) => {
-  try {
-    const body = await c.req.json();
-    const repoName = String(body.repo ?? "");
-    const issuesPerPage = Math.min(100, Math.max(20, Number(body.issuesPerPage ?? 50)));
-
-    const repoInfo = await github.fetchRepoInfo(repoName);
-    if (!repoInfo) return c.json({ error: `Repo not found: ${repoName}` }, 404);
-
-    const issues = await github.fetchOpenIssues(repoName, issuesPerPage);
-    const analysis = analyzeRepo(issues, repoInfo);
-    return c.json(analysis);
-  } catch (e: any) {
-    return safeError(e, "API error");
-  }
-});
-
-app.post("/api/analyze-org", async (c) => {
-  try {
-    const body = await c.req.json();
-    const org = String(body.org ?? "");
-    const repoLimit = Math.min(50, Math.max(5, Number(body.repoLimit ?? 20)));
-    const language = body.language ? String(body.language) : undefined;
-    const issuesPerRepo = Math.min(50, Math.max(10, Number(body.issuesPerRepo ?? 30)));
-    const topGaps = Math.min(25, Math.max(1, Number(body.topGaps ?? 10)));
-
-    const repos = await github.fetchOrgRepos(org, repoLimit, language);
-    if (!repos.length) return c.json({ error: `No repos found for org: ${org}` }, 404);
-
-    const allIssues = (
-      await Promise.all(repos.map((r) => github.fetchOpenIssues(r.fullName, issuesPerRepo)))
-    ).flat();
-    const gaps = findGaps(allIssues, repos, topGaps, language);
-
-    return c.json({
-      org,
-      reposFound: repos.length,
-      issuesAnalyzed: allIssues.length,
-      gaps,
-      repos: repos.map((r) => ({
-        fullName: r.fullName,
-        stars: r.stars,
-        lastPushed: r.lastPushed,
-        openIssues: r.openIssues,
-        isAbandoned: r.isAbandoned,
-      })),
-      abandonedRepos: repos.filter((r) => r.isAbandoned).map((r) => r.fullName),
-    });
-  } catch (e: any) {
-    return safeError(e, "API error");
-  }
-});
-
-app.get("/api/abandoned/:language", async (c) => {
-  try {
-    const language = c.req.param("language") ?? "";
-    const topic = c.req.query("topic") || undefined;
-    const repoLimit = Math.min(50, Math.max(5, Number(c.req.query("repoLimit") ?? 30)));
-    if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
-    const repos = await github.searchTopRepos(language, repoLimit, topic);
-    const abandoned = repos.filter((r) => r.isAbandoned);
-    return c.json({
-      language,
-      reposChecked: repos.length,
-      abandonedCount: abandoned.length,
-      abandoned: abandoned.map((r) => ({
-        repo: r.fullName,
-        stars: r.stars,
-        lastPushed: r.lastPushed,
-        openIssues: r.openIssues,
-      })),
-    });
-  } catch (e: any) {
-    return safeError(e, "API error");
-  }
-});
 
 app.get("/api/count-issues", async (c) => {
   try {
@@ -194,7 +40,7 @@ app.get("/api/count-issues", async (c) => {
     const totalCount = await github.countIssues(language, topic || undefined);
     return c.json({ totalCount });
   } catch (e: any) {
-    return safeError(e, "count-issues");
+    return c.json(safeError(e, "count-issues"), 500);
   }
 });
 
@@ -211,58 +57,42 @@ app.post("/api/trending-issues", async (c) => {
     const issues = await github.fetchTrendingIssues(language, topic, timeframe, limits[timeframe]);
     return c.json({ issues, timeframe, totalShown: issues.length });
   } catch (e: any) {
-    return safeError(e, "trending-issues");
+    return c.json(safeError(e, "trending-issues"), 500);
   }
 });
 
-app.post("/api/analyse", async (c) => {
+async function callAi(
+  provider: string,
+  apiKey: string,
+  model: string | undefined,
+  prompt: string,
+  maxTokens = 500
+): Promise<{ summary?: string; error?: string }> {
   try {
-    const body = await c.req.json();
-    const { apiKey, provider, model, repo, issueTitle, issueBody, labels } = body;
-    if (!apiKey || !provider || !repo || !issueTitle) {
-      return c.json({ error: "Missing required fields." }, 400);
-    }
-
-    const meta = await github.fetchRepoMeta(String(repo));
-
-    const prompt =
-      `You are a developer assistant. Analyse this GitHub issue concisely.\n\n` +
-      `Repo: ${repo}\n` +
-      `Repo description: ${meta.description || "Not available"}\n` +
-      `Languages: ${meta.languages.length ? meta.languages.join(", ") : "Not available"}\n` +
-      `Issue title: ${issueTitle}\n` +
-      `Issue body: ${String(issueBody ?? "").slice(0, 500)}\n` +
-      `Labels: ${(labels ?? []).join(", ") || "None"}\n\n` +
-      `Reply in exactly this format:\n` +
-      `**Product:** [1-2 sentences on what this repo does]\n` +
-      `**Languages:** [comma-separated list]\n` +
-      `**Issue Summary:** [2-3 sentences on the problem and what solving it would require]`;
-
-    let summary = "";
-
-    if (provider === "claude") {
+    if (provider === "claude" || provider === "anthropic") {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
-          "x-api-key": String(apiKey),
+          "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: String(model || "claude-sonnet-4-6"),
-          max_tokens: 400,
+          model: String(model || "claude-haiku-4-5"),
+          max_tokens: maxTokens,
           messages: [{ role: "user", content: prompt }],
         }),
       });
       const data: any = await res.json();
-      if (!res.ok) return c.json({ error: data.error?.message ?? "Claude API error" }, 400);
-      summary = data.content?.[0]?.text ?? "";
-    } else if (provider === "openai" || provider === "openrouter") {
+      if (!res.ok) return { error: data.error?.message ?? "Claude API error" };
+      return { summary: data.content?.[0]?.text ?? "" };
+    }
+    if (provider === "openai" || provider === "openrouter") {
       const baseUrl =
         provider === "openrouter"
           ? "https://openrouter.ai/api/v1"
           : "https://api.openai.com/v1";
-      const defaultModel = provider === "openrouter" ? "deepseek/deepseek-chat" : "gpt-4o";
+      const defaultModel = provider === "openrouter" ? "deepseek/deepseek-chat" : "gpt-4o-mini";
       const res = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -274,1195 +104,2129 @@ app.post("/api/analyse", async (c) => {
         },
         body: JSON.stringify({
           model: String(model || defaultModel),
-          max_tokens: 400,
+          max_tokens: maxTokens,
           messages: [{ role: "user", content: prompt }],
         }),
       });
       const data: any = await res.json();
-      if (!res.ok) return c.json({ error: data.error?.message ?? "API error" }, 400);
-      summary = data.choices?.[0]?.message?.content ?? "";
-    } else {
-      return c.json({ error: "Unknown provider." }, 400);
+      if (!res.ok) return { error: data.error?.message ?? "API error" };
+      return { summary: data.choices?.[0]?.message?.content ?? "" };
     }
-
-    return c.json({ summary });
+    return { error: "Unknown provider." };
   } catch (e: any) {
-    return safeError(e, "analyse");
+    return { error: e?.message || "AI request failed" };
+  }
+}
+
+app.post("/api/analyse", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { apiKey, provider, model, repo, issueTitle, issueBody, labels } = body;
+    if (!apiKey || !provider || !repo || !issueTitle) {
+      return c.json({ error: "Missing required fields." }, 400);
+    }
+    const meta = await github.fetchRepoMeta(String(repo));
+    const prompt =
+      `You are a developer assistant. Analyse this GitHub issue concisely.\n\n` +
+      `Repo: ${repo}\n` +
+      `Repo description: ${meta.description || "Not available"}\n` +
+      `Languages: ${meta.languages.length ? meta.languages.join(", ") : "Not available"}\n` +
+      `Issue title: ${issueTitle}\n` +
+      `Issue body: ${String(issueBody ?? "").slice(0, 500)}\n` +
+      `Labels: ${(labels ?? []).join(", ") || "None"}\n\n` +
+      `Reply in exactly this format (do not add any other text):\n` +
+      `**Product:** [1-2 sentences on what this repo does]\n` +
+      `**Languages:** [comma-separated list]\n` +
+      `**Issue Summary:** [2-3 sentences on the problem and what solving it would require]`;
+    const r = await callAi(String(provider), String(apiKey), model ? String(model) : undefined, prompt, 400);
+    if (r.error) return c.json({ error: r.error }, 400);
+    return c.json({ summary: r.summary || "" });
+  } catch (e: any) {
+    return c.json(safeError(e, "analyse"), 500);
   }
 });
 
-app.get("/", (c) => c.html(DASHBOARD_HTML));
+app.get("/api/count-repos", async (c) => {
+  try {
+    const language = c.req.query("language") ?? "";
+    const topic = c.req.query("topic") ?? "";
+    if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
+    const totalCount = await github.countRepos(language, topic || undefined);
+    return c.json({ totalCount });
+  } catch (e: any) {
+    return c.json(safeError(e, "count-repos"), 500);
+  }
+});
 
-const DASHBOARD_HTML = `<!DOCTYPE html>
+app.post("/api/trending-repos", async (c) => {
+  try {
+    const body = await c.req.json();
+    const language = String(body.language ?? "");
+    const topic = body.topic ? String(body.topic) : undefined;
+    const tf = body.timeframe;
+    const timeframe: "daily" | "weekly" | "monthly" =
+      tf === "daily" || tf === "weekly" || tf === "monthly" ? tf : "weekly";
+    const limits = { daily: 20, weekly: 30, monthly: 50 };
+    if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
+    const repos = await github.fetchTrendingRepos(language, topic, timeframe, limits[timeframe]);
+    return c.json({ repos, timeframe, totalShown: repos.length });
+  } catch (e: any) {
+    return c.json(safeError(e, "trending-repos"), 500);
+  }
+});
+
+app.post("/api/org-topics", async (c) => {
+  try {
+    const body = await c.req.json();
+    const org = String(body.org ?? "").trim();
+    const topic = body.topic ? String(body.topic).trim() : undefined;
+    if (!org) return c.json({ error: "Provide an organization." }, 400);
+    const [info, topics] = await Promise.all([
+      github.fetchOrgInfo(org),
+      github.fetchOrgTopTopics(org, topic, 10),
+    ]);
+    if (!info) return c.json({ error: `Organization not found: ${org}` }, 404);
+    return c.json({ info, topics });
+  } catch (e: any) {
+    return c.json(safeError(e, "org-topics"), 500);
+  }
+});
+
+app.post("/api/analyse-repo", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { apiKey, provider, model, repo } = body;
+    if (!apiKey || !provider || !repo) {
+      return c.json({ error: "Missing required fields." }, 400);
+    }
+    const [info, meta] = await Promise.all([
+      github.fetchRepoInfo(String(repo)),
+      github.fetchRepoMeta(String(repo)),
+    ]);
+    if (!info) return c.json({ error: `Repo not found: ${repo}` }, 404);
+    const created = info.lastPushed ? "" : "";
+    // Get full createdAt via a small additional call (already in fetchRepoInfo's source data — keep simple)
+    let createdAtIso = "";
+    try {
+      const [owner, name] = String(repo).split("/");
+      const { data } = await (github as any).octokit.repos.get({ owner, repo: name });
+      createdAtIso = data.created_at ?? "";
+    } catch {}
+    const ageDays = createdAtIso
+      ? Math.floor((Date.now() - new Date(createdAtIso).getTime()) / 86400000)
+      : 0;
+    const ageStr =
+      ageDays >= 365
+        ? `${(ageDays / 365).toFixed(1)} years (${ageDays} days)`
+        : `${ageDays} days`;
+    const prompt =
+      `You are a developer assistant. Analyse this GitHub repository concisely.\n\n` +
+      `Repo: ${repo}\n` +
+      `Description: ${meta.description || "Not available"}\n` +
+      `Languages used: ${meta.languages.length ? meta.languages.join(", ") : "Not available"}\n` +
+      `Stars: ${info.stars}\n` +
+      `Open issues: ${info.openIssues}\n` +
+      `Age: ${ageStr}\n` +
+      `Last pushed: ${info.lastPushed || "unknown"}\n\n` +
+      `Reply in exactly this format (do not add any other text):\n` +
+      `**Product:** [2-3 sentences on what this repo does and who uses it]\n` +
+      `**Languages used:** [comma-separated list, primary first]\n` +
+      `**Age:** [age + 1 sentence on maturity / activity status]\n` +
+      `**Stars:** [number + 1 sentence on community size]\n` +
+      `**Open issues:** [number + 1 sentence on what kinds of issues dominate]\n` +
+      `**Summary:** [3-4 sentences: where this repo fits in the ecosystem, strengths, gaps, who should consider contributing]`;
+    const r = await callAi(String(provider), String(apiKey), model ? String(model) : undefined, prompt, 700);
+    if (r.error) return c.json({ error: r.error }, 400);
+    return c.json({ summary: r.summary || "", info, languages: meta.languages, ageDays, createdAt: createdAtIso });
+  } catch (e: any) {
+    return c.json(safeError(e, "analyse-repo"), 500);
+  }
+});
+
+app.post("/api/analyse-topic", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { apiKey, provider, model, org, topic } = body;
+    if (!apiKey || !provider || !org || !topic) {
+      return c.json({ error: "Missing required fields." }, 400);
+    }
+    const topics = await github.fetchOrgTopTopics(String(org), String(topic), 1);
+    const match = topics.find((t) => t.name === String(topic).toLowerCase()) || topics[0];
+    if (!match) return c.json({ error: `Topic '${topic}' not found in org '${org}'.` }, 404);
+    const repoList = match.sampleRepos
+      .map((r) => `- ${r.fullName} (${r.stars}★) — ${r.description || "no description"}`)
+      .join("\n");
+    const prompt =
+      `You are a developer assistant. Analyse this GitHub topic within a specific organization.\n\n` +
+      `Organization: ${org}\n` +
+      `Topic: ${topic}\n` +
+      `Repos in this org tagged with this topic (top by stars): ${match.repoCount} total\n` +
+      `${repoList}\n` +
+      `Primary languages across these repos: ${match.languages.join(", ") || "varied"}\n` +
+      `Total open issues across these repos: ${match.totalOpenIssues}\n` +
+      `Total stars across these repos: ${match.totalStars}\n\n` +
+      `Reply in exactly this format (do not add any other text):\n` +
+      `**Topic:** [1-2 sentences explaining what this topic represents]\n` +
+      `**What it covers:** [2-3 sentences on what the org's work in this area focuses on]\n` +
+      `**Repos in this org:** [name the top 3-5 repos and a phrase each on what they do]\n` +
+      `**Primary languages:** [comma-separated, primary first]\n` +
+      `**Total open issues:** [number + 1 sentence on what kinds of issues typically appear here]\n` +
+      `**Summary:** [3-4 sentences: where this topic sits in the org's portfolio, momentum, opportunities for contributors]`;
+    const r = await callAi(String(provider), String(apiKey), model ? String(model) : undefined, prompt, 800);
+    if (r.error) return c.json({ error: r.error }, 400);
+    return c.json({ summary: r.summary || "", topic: match });
+  } catch (e: any) {
+    return c.json(safeError(e, "analyse-topic"), 500);
+  }
+});
+
+app.get("/", (c) => c.html(PAGE_HTML));
+
+const PAGE_HTML = String.raw`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>GapScout</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<title>GapScout — Find GitHub Gaps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh}
-header{background:#1e293b;border-bottom:1px solid #334155;padding:16px 32px;display:flex;align-items:center;gap:12px}
-header h1{font-size:20px;font-weight:700;color:#f8fafc}
-header span{background:#3b82f6;color:#fff;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px}
-.container{max-width:1100px;margin:0 auto;padding:32px 24px}
-.tabs{display:flex;gap:4px;margin-bottom:28px;border-bottom:1px solid #334155;padding-bottom:0}
-.tab-btn{padding:10px 20px;background:none;border:none;color:#94a3b8;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .15s}
-.tab-btn.active{color:#3b82f6;border-bottom-color:#3b82f6}
-.tab-btn:hover:not(.active){color:#e2e8f0}
-.tab-panel{display:none}.tab-panel.active{display:block}
-.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:20px}
-.form-group{display:flex;flex-direction:column;gap:6px}
-label{font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em}
-input,select{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:8px 12px;border-radius:6px;font-size:14px;font-family:inherit;outline:none;transition:border-color .15s}
-input:focus,select:focus{border-color:#3b82f6}
-input[type=checkbox]{width:16px;height:16px;cursor:pointer;margin-top:4px}
-.btn{background:#3b82f6;color:#fff;border:none;padding:10px 20px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s}
-.btn:hover{background:#2563eb}
-.btn:disabled{background:#334155;cursor:not-allowed}
-.btn-sm{padding:6px 12px;font-size:12px;background:#1e293b;border:1px solid #334155;color:#94a3b8}
-.btn-sm:hover{background:#334155;color:#e2e8f0}
-.spinner{display:none;text-align:center;padding:40px;color:#64748b}
-.spinner.show{display:block}
-.error-box{display:none;background:#450a0a;border:1px solid #991b1b;color:#fca5a5;padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:14px}
-.error-box.show{display:block}
-.results-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-.results-header h3{font-size:16px;font-weight:600;color:#f1f5f9}
-.badge{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-weight:600;padding:3px 8px;border-radius:10px}
-.gap-card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:12px}
-.gap-card-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
-.gap-theme{font-size:18px;font-weight:700;color:#f1f5f9;font-family:'JetBrains Mono',monospace}
-.gap-score{background:#1d4ed8;color:#bfdbfe;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px}
-.gap-meta{display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap}
-.meta-item{font-size:13px;color:#64748b}
-.meta-item strong{color:#94a3b8}
-.keywords{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
-.kw-tag{background:#0f2040;color:#60a5fa;font-size:11px;font-family:'JetBrains Mono',monospace;padding:3px 8px;border-radius:4px}
-.issues-list{display:flex;flex-direction:column;gap:6px}
-.issue-link{display:flex;align-items:center;gap:8px;font-size:13px;color:#94a3b8;text-decoration:none;padding:6px 8px;border-radius:4px;transition:background .1s}
-.issue-link:hover{background:#334155;color:#e2e8f0}
-.reactions-badge{background:#0f172a;color:#fbbf24;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px;white-space:nowrap}
-.worth-building{margin:10px 0 8px;padding:10px 12px;background:#0f172a;border-radius:8px;border-left:3px solid #6366f1}
-.wb-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;margin-bottom:6px}
-.wb-badge.strong{background:#14532d;color:#86efac}
-.wb-badge.promising{background:#1e3a5f;color:#93c5fd}
-.wb-badge.niche{background:#3d2900;color:#fcd34d}
-.wb-badge.saturated{background:#1e1e2e;color:#64748b}
-.wb-score-num{font-size:13px;color:#94a3b8;margin-left:4px}
-.wb-reasoning{font-size:12px;color:#64748b;margin-top:4px;line-height:1.5}
-.wb-breakdown{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
-.wb-dim{display:flex;flex-direction:column;gap:2px;min-width:80px;flex:1}
-.wb-dim-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.05em}
-.wb-dim-bar-wrap{background:#1e293b;border-radius:3px;height:4px;overflow:hidden}
-.wb-dim-bar{height:4px;background:#6366f1;border-radius:3px;transition:width .3s}
-.wb-dim-val{font-size:11px;color:#94a3b8;font-weight:600}
-.registry-signal{margin-top:8px;font-size:12px;color:#475569;display:flex;align-items:center;gap:6px}
-.registry-signal strong{color:#64748b}
-.insights-panel{background:linear-gradient(135deg,#1e1b4b,#1e293b);border:1px solid #4f46e5;border-radius:12px;padding:20px 24px;margin-bottom:20px}
-.insights-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.insights-title{font-size:12px;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.08em}
-.insights-stats{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px}
-.insights-stat-val{font-size:26px;font-weight:800;color:#a5b4fc;font-family:'JetBrains Mono',monospace;display:block}
-.insights-stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
-.insights-top{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}
-.insights-row{display:flex;align-items:center;gap:10px;font-size:13px}
-.insights-rank{color:#6366f1;font-weight:700;width:18px;flex-shrink:0}
-.insights-label{color:#e2e8f0;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.insights-meta{font-size:11px;color:#64748b;white-space:nowrap}
-.insights-takeaway{font-size:12px;color:#94a3b8;border-top:1px solid #334155;padding-top:10px;line-height:1.6}
-.insights-takeaway strong{color:#c4b5fd}
-.btn-report{background:transparent;border:1px solid #4f46e5;color:#a5b4fc;font-size:11px;font-weight:600;padding:5px 12px;border-radius:6px;cursor:pointer;white-space:nowrap}
-.btn-report:hover{background:#4f46e5;color:#fff}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{text-align:left;padding:10px 12px;border-bottom:2px solid #334155;color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
-td{padding:10px 12px;border-bottom:1px solid #1e293b;vertical-align:top}
-tr:hover td{background:#1e293b}
-.stale-badge{background:#451a03;color:#fb923c;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px}
-.label-tag{background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;padding:2px 6px;border-radius:4px;display:inline-block;margin:1px}
-a{color:#60a5fa;text-decoration:none}
-a:hover{text-decoration:underline}
-.section{margin-bottom:28px}
-.section h4{font-size:14px;font-weight:600;color:#94a3b8;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #1e293b}
-.bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}
-.bar-label{width:120px;color:#94a3b8;text-align:right;flex-shrink:0}
-.bar-track{flex:1;background:#1e293b;border-radius:3px;height:10px}
-.bar-fill{background:#3b82f6;height:10px;border-radius:3px;min-width:2px}
-.opp-card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:10px;display:flex;flex-direction:column;gap:10px}
-.opp-card-title{font-size:14px;font-weight:600;color:#f1f5f9;line-height:1.4}
-.opp-card-meta{display:flex;gap:14px;font-size:12px;color:#64748b;flex-wrap:wrap;align-items:center}
-.opp-card-actions{display:flex;gap:8px}
-.btn-github{background:#238636;color:#fff;border:none;padding:7px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
-.btn-github:hover{background:#2ea043;text-decoration:none}
-.btn-pickup{background:#7c3aed;color:#fff;border:none;padding:7px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
-.btn-pickup:hover{background:#6d28d9}
-.btn-pickup.picked{background:#334155;color:#64748b;cursor:default}
-.picked-section{margin-top:24px;border-top:1px solid #334155;padding-top:20px}
-.picked-section h4{font-size:14px;font-weight:600;color:#94a3b8;margin-bottom:12px}
-.picked-item{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1e293b;border-radius:6px;margin-bottom:6px;font-size:13px}
-.picked-item a{color:#60a5fa;text-decoration:none;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.picked-item .repo-name{color:#64748b;font-size:11px;font-family:monospace;white-space:nowrap}
-.btn-remove{background:none;border:none;color:#64748b;cursor:pointer;font-size:14px;padding:2px 6px;border-radius:4px;flex-shrink:0}
-.btn-remove:hover{color:#f87171;background:#450a0a}
-.shuffle-bar{display:flex;align-items:center;gap:10px;margin-bottom:16px}
-.bar-count{color:#64748b;width:40px;flex-shrink:0}
-.repo-info{display:flex;gap:20px;margin-bottom:20px;flex-wrap:wrap}
-.repo-stat{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 16px;text-align:center}
-.repo-stat-value{font-size:22px;font-weight:700;color:#f1f5f9;font-family:'JetBrains Mono',monospace}
-.repo-stat-label{font-size:11px;color:#64748b;margin-top:2px}
-.search-bar{display:flex;gap:16px;align-items:flex-end;margin-bottom:20px;flex-wrap:wrap}
-.search-bar .form-group{flex:1;min-width:160px}
-.issue-count-display{font-size:26px;font-weight:800;color:#f1f5f9;margin-bottom:16px}
-.issue-count-display span{color:#3b82f6;font-family:'JetBrains Mono',monospace}
-.timeframe-bar{display:flex;gap:8px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
-.tf-btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-.tf-btn:hover{background:#334155;color:#e2e8f0;border-color:#6366f1}
-.tf-btn.active{background:#4f46e5;border-color:#4f46e5;color:#fff}
-.trend-card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:10px}
-.trend-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
-.trend-card-title{font-size:14px;font-weight:600;color:#f1f5f9;line-height:1.4;flex:1;text-decoration:none}
-.trend-card-title:hover{color:#60a5fa;text-decoration:none}
-.trend-card-meta{display:flex;gap:12px;font-size:12px;color:#64748b;flex-wrap:wrap;margin-bottom:10px;align-items:center}
-.btn-analyse{background:#7c3aed;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;white-space:nowrap}
-.btn-analyse:hover:not(:disabled){background:#6d28d9}
-.btn-analyse:disabled{background:#334155;color:#64748b;cursor:default}
-.analysis-box{margin-top:12px;padding:12px 14px;background:#0f172a;border-radius:8px;border-left:3px solid #7c3aed;font-size:13px;color:#94a3b8;line-height:1.7;display:none}
-.analysis-box.show{display:block}
-.analysis-box strong{color:#c4b5fd}
-.settings-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;align-items:center;justify-content:center}
-.settings-overlay.open{display:flex}
-.settings-panel{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:460px;max-width:92vw}
-.btn-settings{margin-left:auto;background:transparent;border:1px solid #334155;color:#94a3b8;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
-.btn-settings:hover{border-color:#6366f1;color:#a5b4fc}
+/* ---------- Tokens ---------- */
+:root {
+  --bg:        oklch(0.16 0.012 250);
+  --bg-2:      oklch(0.185 0.013 252);
+  --surface:   oklch(0.215 0.014 252);
+  --surface-2: oklch(0.245 0.014 252);
+  --border:    oklch(0.30 0.012 252);
+  --border-2:  oklch(0.36 0.014 252);
+  --text:      oklch(0.965 0.005 250);
+  --text-2:    oklch(0.78 0.008 250);
+  --muted:     oklch(0.60 0.012 250);
+  --muted-2:   oklch(0.46 0.012 250);
+
+  --accent:        oklch(0.80 0.155 70);
+  --accent-soft:   oklch(0.80 0.155 70 / 0.14);
+  --accent-deep:   oklch(0.70 0.16 65);
+  --info:          oklch(0.78 0.13 235);
+  --info-soft:     oklch(0.78 0.13 235 / 0.14);
+  --ok:            oklch(0.78 0.14 155);
+  --warn:          oklch(0.80 0.15 80);
+  --danger:        oklch(0.72 0.18 25);
+
+  --font-ui: "Geist", "Söhne", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  --shadow-card: 0 1px 0 0 oklch(1 0 0 / 0.04) inset, 0 0 0 1px var(--border), 0 20px 40px -24px oklch(0 0 0 / 0.55);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background:
+    radial-gradient(1100px 600px at 10% -10%, oklch(0.27 0.04 255 / 0.45), transparent 60%),
+    radial-gradient(900px 500px at 110% 0%, oklch(0.30 0.06 60 / 0.18), transparent 65%),
+    var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.005em;
+}
+.mono { font-family: var(--font-mono); letter-spacing: 0; }
+.small { font-size: 12px; }
+.muted { color: var(--muted); }
+.opt { color: var(--muted-2); font-weight: 400; font-size: 11px; margin-left: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+
+.app { min-height: 100%; display: flex; flex-direction: column; }
+.header {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 48px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--bg) 84%, transparent);
+  backdrop-filter: blur(14px);
+}
+.header-right { display: flex; align-items: center; gap: 14px; }
+.header-meta { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+
+.logo { display: flex; align-items: center; gap: 12px; color: var(--accent); }
+.logo-text { color: var(--text); }
+.logo-title { font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
+.logo-sub { font-size: 13px; color: var(--muted); letter-spacing: 0.02em; margin-top: -1px; }
+
+.settings-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 12px 8px 10px;
+  border: 1px solid var(--border-2);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+.settings-btn:hover { border-color: var(--accent); color: var(--accent); background: color-mix(in oklab, var(--surface) 92%, var(--accent) 8%); }
+.settings-btn svg { opacity: 0.85; }
+.settings-provider {
+  font-size: 11px; color: var(--muted); padding: 2px 6px;
+  border: 1px solid var(--border); border-radius: 6px; margin-left: 2px;
+  background: var(--bg-2);
+}
+
+.main {
+  flex: 1; width: 100%; max-width: 1900px; margin: 0 auto;
+  padding: 28px 48px 80px; display: flex; flex-direction: column; gap: 24px;
+}
+
+/* Tab bar */
+.tabs-bar {
+  display: inline-flex; align-self: flex-start; gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px;
+}
+.tab-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 9px 18px; border-radius: 8px;
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-2); font-family: inherit; font-size: 14.5px; font-weight: 500;
+  cursor: pointer; transition: all 0.16s ease;
+}
+.tab-pill:hover:not(.active) { color: var(--text); background: var(--bg-2); }
+.tab-pill.active {
+  background: var(--bg);
+  border-color: var(--border-2);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.tab-pill .tp-glyph { font-size: 14px; opacity: 0.85; }
+
+/* Repo card */
+.repo-card {
+  display: grid; grid-template-columns: 56px 1fr; gap: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  transition: border-color 0.18s, transform 0.18s;
+  overflow: hidden;
+}
+.repo-card:hover { border-color: var(--border-2); }
+.repo-card .rc-rank { font-family: var(--font-mono); color: var(--muted-2); font-size: 14px; padding: 20px 0 0 20px; align-self: start; }
+.repo-card .rc-body { padding: 18px 22px 16px 4px; min-width: 0; }
+.rc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--text-2); }
+.rc-name { color: var(--text); font-size: 18px; font-weight: 600; font-family: var(--font-mono); letter-spacing: -0.005em; text-decoration: none; }
+.rc-name:hover { color: var(--accent); }
+.rc-stars { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.rc-stars .ic { color: var(--accent); font-size: 11px; }
+.rc-desc { margin-top: 10px; color: var(--text-2); font-size: 15px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rc-topics { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.rc-topic-chip { font-family: var(--font-mono); font-size: 11.5px; color: var(--info); background: var(--info-soft); border: 1px solid oklch(0.78 0.13 235 / 0.3); padding: 2px 9px; border-radius: 999px; }
+.rc-footer { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.rc-issues { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+
+/* Topic card */
+.topic-card {
+  display: grid; grid-template-columns: 56px 1fr; gap: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  transition: border-color 0.18s;
+  overflow: hidden;
+}
+.topic-card:hover { border-color: var(--border-2); }
+.topic-card .tc-rank { font-family: var(--font-mono); color: var(--muted-2); font-size: 14px; padding: 22px 0 0 20px; }
+.topic-card .tc-body { padding: 20px 22px 18px 4px; min-width: 0; }
+.tc-name { font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--accent); letter-spacing: -0.01em; }
+.tc-stats { display: flex; align-items: center; gap: 12px; margin-top: 8px; font-size: 14px; color: var(--text-2); flex-wrap: wrap; }
+.tc-stat { display: inline-flex; align-items: center; gap: 6px; }
+.tc-stat strong { color: var(--text); font-weight: 600; }
+.tc-stat .ic { color: var(--accent); }
+.tc-repos { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.tc-repo-link { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px; text-decoration: none; transition: all 0.15s; }
+.tc-repo-link:hover { color: var(--accent); border-color: var(--accent); }
+.tc-footer { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.tc-langs { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Org info banner */
+.org-banner {
+  display: flex; align-items: center; gap: 18px;
+  background: linear-gradient(180deg, var(--surface) 0%, var(--bg-2) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: 18px 22px;
+}
+.org-avatar { width: 56px; height: 56px; border-radius: 14px; border: 1px solid var(--border-2); background: var(--bg-2); object-fit: cover; }
+.org-meta { flex: 1; min-width: 0; }
+.org-name { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
+.org-desc { color: var(--text-2); margin-top: 4px; font-size: 15px; line-height: 1.5; }
+.org-stats { display: flex; gap: 16px; margin-top: 8px; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.org-stats a { color: var(--accent); text-decoration: none; }
+.org-stats a:hover { text-decoration: underline; }
+
+/* Search panel */
+.search-panel {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--bg-2) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: 22px;
+  box-shadow: var(--shadow-card);
+  position: relative;
+  overflow: hidden;
+}
+.search-panel::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    radial-gradient(600px 200px at 30% -10%, oklch(0.80 0.155 70 / 0.10), transparent 60%);
+  pointer-events: none;
+}
+.search-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 12px;
+  position: relative;
+}
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field label {
+  font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted); font-weight: 500;
+}
+.input-wrap {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-md);
+  padding: 0 14px;
+  height: 52px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px oklch(0.80 0.155 70 / 0.12);
+}
+.input-icon {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  width: 16px; text-align: center;
+}
+.input-wrap input {
+  flex: 1; min-width: 0;
+  background: transparent; border: 0; outline: 0;
+  color: var(--text); font-family: inherit; font-size: 16px;
+}
+.input-wrap input::placeholder { color: var(--muted-2); }
+
+.search-btn { height: 52px; padding: 0 24px; font-size: 15px; }
+.search-hints {
+  display: flex; align-items: center; gap: 10px; margin-top: 18px;
+  flex-wrap: wrap;
+}
+.hint-label { font-size: 13px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.1em; margin-right: 4px; }
+.chip-suggest {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.chip-suggest:hover { border-color: var(--accent); color: var(--accent); }
+.chip-sep { color: var(--muted-2); }
+.chip-lang { color: var(--text); }
+.chip-topic { color: var(--text-2); }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: inherit; font-size: 13.5px; font-weight: 500;
+  border-radius: 10px; cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+  padding: 0 14px; height: 36px;
+  white-space: nowrap;
+}
+.btn-primary {
+  background: var(--accent);
+  color: oklch(0.18 0.02 60);
+  border-color: var(--accent);
+}
+.btn-primary:hover:not(:disabled) {
+  background: oklch(0.85 0.16 70);
+  box-shadow: 0 8px 24px -10px oklch(0.80 0.155 70 / 0.55);
+  transform: translateY(-1px);
+}
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-ghost {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-2);
+}
+.btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+.btn kbd {
+  background: oklch(0.30 0.02 60); color: oklch(0.16 0.02 60);
+  padding: 1px 6px; border-radius: 4px; font-size: 11px; font-family: var(--font-mono);
+  margin-left: 2px;
+}
+.link-btn {
+  background: transparent; border: 0; color: var(--muted);
+  font-family: inherit; font-size: 12.5px; cursor: pointer; padding: 4px 6px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+.link-btn:hover { color: var(--text); background: var(--surface); }
+
+.icon-btn {
+  background: transparent; border: 0; color: var(--muted);
+  width: 28px; height: 28px; border-radius: 8px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+.icon-btn:hover { background: var(--surface); color: var(--text); }
+
+.ghost-mini {
+  background: transparent; border: 1px solid var(--border-2); color: var(--muted);
+  font-family: inherit; font-size: 11px;
+  padding: 2px 8px; border-radius: 6px; cursor: pointer;
+}
+.ghost-mini:hover { color: var(--text); border-color: var(--accent); }
+
+/* Spinners */
+.spinner, .spinner-sm {
+  display: inline-block;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+.spinner { width: 14px; height: 14px; }
+.spinner-sm { width: 11px; height: 11px; border-width: 1.5px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Stats strip */
+.stats-strip {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 24px;
+  padding: 8px 4px 0;
+}
+.stat-main { display: flex; flex-direction: column; gap: 4px; }
+.stat-num {
+  font-size: 56px; font-weight: 600; letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(180deg, var(--text) 0%, oklch(0.78 0.04 70) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  line-height: 1.05;
+}
+.stat-label { color: var(--text-2); font-size: 17px; }
+.stat-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.stat-pip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 4px 10px; border-radius: 999px;
+}
+.stat-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted-2); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 3px oklch(0.78 0.14 155 / 0.18); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px oklch(0.80 0.15 80 / 0.18); }
+.dot.live { background: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 oklch(0.78 0.14 155 / 0.6); }
+  50%      { opacity: 0.8; box-shadow: 0 0 0 6px oklch(0.78 0.14 155 / 0); }
+}
+
+/* Timeframe bar */
+.timeframe-bar {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 6px;
+}
+.tf {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 0 12px;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.18s;
+}
+.tf:hover { background: var(--bg-2); color: var(--text); }
+.tf.active {
+  background: var(--bg);
+  border-color: var(--border-2);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--accent) inset, 0 8px 24px -16px oklch(0.80 0.155 70 / 0.4);
+}
+.tf-label { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; grid-column: 1; grid-row: 1; }
+.tf-sub { font-size: 13px; color: var(--muted); grid-column: 1; grid-row: 2; font-family: var(--font-mono); }
+.tf-n {
+  grid-column: 2; grid-row: 1 / span 2;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+}
+.tf.active .tf-n { color: var(--accent); border-color: oklch(0.80 0.155 70 / 0.4); background: oklch(0.80 0.155 70 / 0.10); }
+
+/* Results */
+.results-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 4px 0;
+  margin-top: 20px;
+}
+.results-title { font-size: 15px; color: var(--text-2); }
+.rh-em { color: var(--text); font-weight: 600; }
+.results-actions { display: flex; gap: 8px; }
+.results-actions .link-btn {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  padding: 7px 14px;
+  border-radius: 8px;
+  transition: all 0.15s;
+}
+.results-actions .link-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--surface) 92%, var(--accent) 8%);
+}
+.results-actions .link-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.issues { display: flex; flex-direction: column; gap: 10px; }
+
+.issue {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  transition: border-color 0.18s, transform 0.18s;
+  overflow: hidden;
+}
+.issue:hover { border-color: var(--border-2); }
+.issue.expanded { border-color: oklch(0.80 0.155 70 / 0.4); box-shadow: 0 0 0 1px oklch(0.80 0.155 70 / 0.18); }
+.issue.skel { height: 96px; background: linear-gradient(90deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-color: transparent; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.issue-rank {
+  font-family: var(--font-mono);
+  color: var(--muted-2);
+  font-size: 14px;
+  padding: 20px 0 0 20px;
+  align-self: start;
+}
+.issue-body { padding: 18px 22px 16px 4px; min-width: 0; }
+.issue-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--text-2); }
+.repo { color: var(--text); font-weight: 500; }
+.dot-sep { color: var(--muted-2); }
+.lang-swatch { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.badge {
+  font-family: var(--font-mono); font-size: 10.5px;
+  padding: 1px 7px; border-radius: 4px;
+  text-transform: lowercase;
+}
+.badge-stale { color: var(--warn); background: oklch(0.80 0.15 80 / 0.12); border: 1px solid oklch(0.80 0.15 80 / 0.3); }
+
+.issue-title {
+  display: block; margin-top: 8px;
+  color: var(--text); font-size: 18px; font-weight: 500;
+  text-decoration: none;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+  transition: color 0.15s;
+}
+.issue-title:hover { color: var(--accent); }
+
+.issue-footer {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 14px;
+}
+.reactions {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 12px;
+  font-family: var(--font-mono); font-size: 13.5px;
+}
+.r-up { color: var(--accent); font-size: 10px; }
+.r-n { color: var(--text); }
+.comments-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 13px; color: var(--muted);
+}
+.comments-pill .ic { filter: grayscale(1) brightness(1.4); opacity: 0.5; font-size: 12px; }
+
+.labels { display: flex; gap: 6px; flex-wrap: wrap; }
+.label {
+  font-family: var(--font-mono); font-size: 12px;
+  padding: 3px 9px; border-radius: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+.label-bug { color: oklch(0.78 0.16 25); border-color: oklch(0.78 0.16 25 / 0.3); background: oklch(0.78 0.16 25 / 0.10); }
+.label-enhancement { color: oklch(0.78 0.13 200); border-color: oklch(0.78 0.13 200 / 0.3); background: oklch(0.78 0.13 200 / 0.10); }
+.label-help-wanted { color: oklch(0.82 0.16 145); border-color: oklch(0.82 0.16 145 / 0.3); background: oklch(0.82 0.16 145 / 0.10); }
+.label-good-first-issue { color: oklch(0.82 0.16 145); border-color: oklch(0.82 0.16 145 / 0.3); background: oklch(0.82 0.16 145 / 0.10); }
+.label-regression { color: oklch(0.78 0.16 25); border-color: oklch(0.78 0.16 25 / 0.3); background: oklch(0.78 0.16 25 / 0.10); }
+.label-performance { color: oklch(0.85 0.14 85); border-color: oklch(0.85 0.14 85 / 0.3); background: oklch(0.85 0.14 85 / 0.10); }
+
+.spacer { flex: 1; }
+.analyse-btn {
+  background: oklch(0.80 0.155 70 / 0.08);
+  border-color: oklch(0.80 0.155 70 / 0.35);
+  color: var(--accent);
+  height: 34px; padding: 0 14px; font-size: 14px; font-weight: 500;
+}
+.analyse-btn:hover { background: oklch(0.80 0.155 70 / 0.15); border-color: var(--accent); }
+.analyse-btn.done { background: transparent; border-color: var(--border-2); color: var(--text-2); }
+.analyse-btn.done:hover { color: var(--text); }
+.analyse-btn .sparkle { color: var(--accent); }
+.analyse-btn .caret { font-size: 10px; opacity: 0.7; }
+
+/* Analysis expansion */
+.analysis {
+  grid-column: 1 / -1;
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+  padding: 18px 24px 16px 56px;
+  animation: slideDown 0.25s ease;
+}
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.analysis-grid { display: flex; flex-direction: column; gap: 12px; }
+.a-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 16px;
+  align-items: baseline;
+}
+.a-key {
+  font-family: var(--font-mono); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.a-val { color: var(--text-2); font-size: 13.5px; line-height: 1.55; }
+.analysis-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+
+/* Empty state */
+.empty {
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center;
+  padding: 60px 20px 40px;
+}
+.empty-art {
+  position: relative;
+  width: 180px; height: 130px;
+  margin-bottom: 28px;
+}
+.ea-grid {
+  position: absolute; inset: 0;
+  display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px;
+  opacity: 0.4;
+}
+.ea-cell {
+  background: var(--surface-2);
+  border-radius: 2px;
+  animation: ea-blink 4s infinite;
+}
+@keyframes ea-blink {
+  0%, 92%, 100% { background: var(--surface-2); }
+  93%, 96% { background: var(--accent); }
+}
+.ea-target {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 6px var(--bg), 0 0 0 7px oklch(0.80 0.155 70 / 0.6), 0 0 40px 6px oklch(0.80 0.155 70 / 0.4);
+}
+.empty-title { font-size: 26px; font-weight: 500; letter-spacing: -0.02em; max-width: 620px; line-height: 1.35; }
+.empty-sub { color: var(--muted); font-size: 16px; margin-top: 14px; max-width: 560px; line-height: 1.6; }
+
+/* Footer */
+.footer {
+  margin-top: 24px; padding-top: 18px;
+  border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.footer-links { display: flex; gap: 16px; }
+.footer-links a {
+  color: var(--muted); font-family: var(--font-mono); font-size: 12px;
+  text-decoration: none;
+}
+.footer-links a:hover { color: var(--accent); }
+
+/* Modal */
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 100;
+  background: oklch(0 0 0 / 0.55);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+  animation: fadeIn 0.18s ease;
+  padding: 20px;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  width: 100%; max-width: 460px;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-xl);
+  box-shadow: 0 30px 80px -20px oklch(0 0 0 / 0.6), 0 0 0 1px oklch(1 0 0 / 0.04) inset;
+  animation: pop 0.2s cubic-bezier(.2,.9,.3,1.2);
+  overflow: hidden;
+}
+.modal.modal-wide { max-width: 800px; }
+.modal.modal-wide .modal-body { padding: 24px; }
+.modal.modal-wide .modal-head { padding: 22px 24px 16px; }
+.modal.modal-wide .modal-title { font-size: 19px; }
+.modal .a-row { grid-template-columns: 150px 1fr; gap: 22px; }
+.modal .a-key { font-size: 13px; }
+.modal .a-val { font-size: 17px; line-height: 1.7; color: var(--text); }
+.modal .modal-body .analysis-grid { gap: 22px; }
+.modal-title-issue { font-size: 15px; color: var(--text-2); margin-top: 6px; font-weight: 400; line-height: 1.5; }
+.modal-foot-link { color: var(--accent); font-family: inherit; font-size: 14px; text-decoration: none; font-weight: 500; }
+.modal-foot-link:hover { text-decoration: underline; }
+@keyframes pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.modal-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 18px 18px 14px;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.modal-sub { font-size: 12px; color: var(--muted); margin-top: 2px; max-width: 340px; line-height: 1.5; }
+.modal-body { padding: 18px; display: flex; flex-direction: column; gap: 18px; }
+.modal-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+}
+.foot-status { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.foot-actions { display: flex; gap: 8px; }
+
+.form-row { display: flex; flex-direction: column; gap: 8px; }
+.form-row > label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted); font-weight: 500;
+}
+.form-help { font-size: 11.5px; color: var(--muted-2); }
+.form-help .mono { color: var(--muted); }
+
+.provider-grid { display: flex; flex-direction: column; gap: 6px; }
+.provider-card {
+  display: grid;
+  grid-template-columns: 36px 1fr 20px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.provider-card:hover { border-color: var(--border-2); }
+.provider-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--bg) 88%, var(--accent) 12%);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.pc-glyph {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 16px; color: var(--text-2);
+}
+.provider-card.selected .pc-glyph { color: var(--accent); border-color: oklch(0.80 0.155 70 / 0.4); }
+.pc-name { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.pc-model { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.pc-radio {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1.5px solid var(--border-2);
+  display: flex; align-items: center; justify-content: center;
+}
+.provider-card.selected .pc-radio { border-color: var(--accent); }
+.pc-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+
+.key-wrap input { font-family: var(--font-mono); font-size: 12.5px; letter-spacing: 0.04em; }
+
+.error-banner {
+  background: oklch(0.30 0.12 25 / 0.20); border: 1px solid oklch(0.72 0.18 25 / 0.45);
+  color: oklch(0.92 0.06 25); padding: 10px 14px; border-radius: 10px;
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .search-row { grid-template-columns: 1fr; }
+  .stats-strip { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .stat-side { align-items: flex-start; }
+  .timeframe-bar { grid-template-columns: 1fr; }
+  .header { padding: 12px 16px; }
+  .main { padding: 24px 16px 60px; }
+  .a-row { grid-template-columns: 1fr; gap: 4px; }
+  .results-actions { display: none; }
+}
 </style>
 </head>
 <body>
-<header>
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-  <h1>GapScout</h1>
-  <span>v0.3.0</span>
-  <button class="btn-settings" onclick="openSettings()">&#9881; AI Settings</button>
-</header>
-
-<!-- SETTINGS OVERLAY -->
-<div id="settings-overlay" class="settings-overlay" style="display:none">
-  <div class="settings-panel">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-      <h3 style="font-size:16px;font-weight:700;color:#f1f5f9">AI Settings</h3>
-      <button onclick="closeSettings()" style="background:none;border:none;color:#94a3b8;font-size:20px;cursor:pointer;line-height:1">&#x2715;</button>
-    </div>
-    <div class="form-group" style="margin-bottom:16px">
-      <label>Provider</label>
-      <select id="ai-provider" onchange="onProviderChange()">
-        <option value="claude">Claude (Anthropic)</option>
-        <option value="openai">OpenAI</option>
-        <option value="openrouter">OpenRouter (DeepSeek / any model)</option>
-      </select>
-    </div>
-    <div class="form-group" style="margin-bottom:16px">
-      <label>API Key</label>
-      <input id="ai-key" type="password" placeholder="Enter your API key…"/>
-    </div>
-    <div class="form-group" style="margin-bottom:24px">
-      <label>Model <span style="color:#475569;font-size:11px;text-transform:none;letter-spacing:0">(editable)</span></label>
-      <input id="ai-model" placeholder="claude-sonnet-4-6"/>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <button class="btn" onclick="saveSettings()">Save</button>
-      <button class="btn btn-sm" onclick="closeSettings()">Cancel</button>
-      <span id="settings-saved" style="display:none;color:#4ade80;font-size:13px;margin-left:8px">&#10003; Saved</span>
-    </div>
-  </div>
-</div>
-<div class="container">
-  <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('find-gaps')">Find Gaps</button>
-    <button class="tab-btn" onclick="switchTab('opportunities')">Opportunities</button>
-    <button class="tab-btn" onclick="switchTab('search-issues')">Search Issues</button>
-    <button class="tab-btn" onclick="switchTab('analyze-repo')">Analyze Repo</button>
-    <button class="tab-btn" onclick="switchTab('organization')">Organization</button>
-    <button class="tab-btn" onclick="switchTab('abandoned')">Abandoned Repos</button>
-  </div>
-
-  <!-- FIND GAPS (REDESIGNED) -->
-  <div id="tab-find-gaps" class="tab-panel active">
-    <div class="search-bar">
-      <div class="form-group"><label>Language</label><input id="fg-lang" placeholder="python, rust, typescript…" onkeydown="if(event.key==='Enter')runGapsSearch()"/></div>
-      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px;text-transform:none;letter-spacing:0">(optional)</span></label><input id="fg-topic" placeholder="machine-learning, agents, llm…" onkeydown="if(event.key==='Enter')runGapsSearch()"/></div>
-      <div><button id="btn-fg" class="btn" onclick="runGapsSearch()">Search</button></div>
-    </div>
-    <div id="fg-spinner" class="spinner">Searching GitHub…</div>
-    <div id="fg-error" class="error-box"></div>
-    <div id="fg-count-section" style="display:none;margin-top:8px">
-      <div id="fg-count-display" class="issue-count-display"></div>
-      <div class="timeframe-bar">
-        <span style="font-size:13px;color:#64748b;margin-right:4px">Trending:</span>
-        <button class="tf-btn" id="tf-daily" onclick="loadTrending('daily',this)">Daily — Top 20</button>
-        <button class="tf-btn" id="tf-weekly" onclick="loadTrending('weekly',this)">Weekly — Top 30</button>
-        <button class="tf-btn" id="tf-monthly" onclick="loadTrending('monthly',this)">Monthly — Top 50</button>
+<div id="root">
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="25" height="25" rx="7" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+          <circle cx="10.5" cy="14" r="3.2" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M14 14H22" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2 2.5"/>
+          <circle cx="22" cy="14" r="1.2" fill="var(--accent)"/>
+        </svg>
+        <div class="logo-text">
+          <div class="logo-title">GapScout</div>
+          <div class="logo-sub">Find GitHub Gaps</div>
+        </div>
       </div>
-      <div id="fg-trending-spinner" class="spinner" style="display:none">Loading trending issues…</div>
-    </div>
-    <div id="fg-results" style="margin-top:8px"></div>
-  </div>
+      <div class="header-right">
+        <div class="header-meta">
+          <span class="dot ok"></span>
+          <span class="mono small">api · /api/trending-issues</span>
+        </div>
+        <button class="settings-btn" id="open-settings">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1.07-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1.07 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+          AI Settings
+          <span class="settings-provider mono" id="provider-pill">openrouter</span>
+        </button>
+      </div>
+    </header>
 
-  <!-- OPPORTUNITIES -->
-  <div id="tab-opportunities" class="tab-panel">
-    <div class="form-grid">
-      <div class="form-group"><label>Language</label><input id="op-lang" placeholder="python, rust, go…"/></div>
-      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="op-topic" placeholder="machine-learning, agents…"/></div>
-      <div class="form-group"><label>Max Participants</label><input id="op-max-participants" type="number" value="3" min="1" max="20"/></div>
-      <div class="form-group"><label>Min Reactions</label><input id="op-min-reactions" type="number" value="5" min="0"/></div>
-      <div class="form-group"><label>Min Age (days)</label><input id="op-min-age" type="number" value="30" min="0"/></div>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
-      <button id="btn-op" class="btn" onclick="runOpportunities()">Find Opportunities</button>
-      <button class="btn btn-sm" onclick="shuffleOpportunities()" title="Shuffle results">⇄ Shuffle</button>
-    </div>
-    <p style="color:#64748b;font-size:12px;margin-bottom:20px">Issues with few contributors — good candidates to pick up and contribute to</p>
-    <div id="op-spinner" class="spinner">Scanning for opportunities…</div>
-    <div id="op-error" class="error-box"></div>
-    <div id="op-cards"></div>
-    <div id="op-picked"></div>
-  </div>
+    <main class="main">
+      <div class="tabs-bar" role="tablist">
+        <button class="tab-pill active" role="tab" data-tab="issues"><span class="tp-glyph">⚑</span> Issues</button>
+        <button class="tab-pill" role="tab" data-tab="repos"><span class="tp-glyph">◇</span> Repositories</button>
+        <button class="tab-pill" role="tab" data-tab="org"><span class="tp-glyph">◉</span> Organization</button>
+      </div>
 
-  <!-- ORGANIZATION -->
-  <div id="tab-organization" class="tab-panel">
-    <div class="form-grid">
-      <div class="form-group"><label>Organization *</label><input id="og-org" placeholder="microsoft, vercel, apache…"/></div>
-      <div class="form-group"><label>Repo Limit</label><input id="og-repo-limit" type="number" value="20" min="5" max="50"/></div>
-      <div class="form-group"><label>Language Filter</label><input id="og-lang" placeholder="optional"/></div>
-      <div class="form-group"><label>Issues Per Repo</label><input id="og-issues-per-repo" type="number" value="30" min="10" max="50"/></div>
-      <div class="form-group"><label>Top Gaps</label><input id="og-top-gaps" type="number" value="10" min="1" max="25"/></div>
-    </div>
-    <button id="btn-og" class="btn" onclick="runOrgAnalysis()">Analyze Organization</button>
-    <div id="og-spinner" class="spinner">Fetching org repos and analyzing…</div>
-    <div id="og-error" class="error-box"></div>
-    <div id="og-results" style="margin-top:24px"></div>
-  </div>
+      <!-- ISSUES + REPOS share the same form shape (language + topic) -->
+      <form class="search-panel" id="search-form-lt" autocomplete="off">
+        <div class="search-row">
+          <div class="field">
+            <label for="lang-input">Language</label>
+            <div class="input-wrap">
+              <span class="input-icon">&lt;/&gt;</span>
+              <input id="lang-input" placeholder="python, typescript, rust…" spellcheck="false" autocomplete="off"/>
+            </div>
+          </div>
+          <div class="field">
+            <label for="topic-input">Topic <span class="opt">optional</span></label>
+            <div class="input-wrap">
+              <span class="input-icon">#</span>
+              <input id="topic-input" placeholder="agents, scraping, inference…" spellcheck="false" autocomplete="off"/>
+            </div>
+          </div>
+          <button class="btn btn-primary search-btn" type="submit" id="search-btn">
+            <span id="search-btn-label">Search</span>
+            <kbd>↵</kbd>
+          </button>
+        </div>
+        <div class="search-hints">
+          <span class="hint-label">Try</span>
+          <button type="button" class="chip-suggest" data-l="python" data-t="agents"><span class="chip-lang">python</span><span class="chip-sep">·</span><span class="chip-topic">agents</span></button>
+          <button type="button" class="chip-suggest" data-l="rust" data-t=""><span class="chip-lang">rust</span></button>
+          <button type="button" class="chip-suggest" data-l="typescript" data-t="scraping"><span class="chip-lang">typescript</span><span class="chip-sep">·</span><span class="chip-topic">scraping</span></button>
+          <button type="button" class="chip-suggest" data-l="go" data-t="observability"><span class="chip-lang">go</span><span class="chip-sep">·</span><span class="chip-topic">observability</span></button>
+        </div>
+      </form>
 
-  <!-- SEARCH ISSUES -->
-  <div id="tab-search-issues" class="tab-panel">
-    <div class="form-grid">
-      <div class="form-group"><label>Language</label><input id="si-lang" placeholder="python, rust…"/></div>
-      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="si-topic" placeholder="machine-learning, agents…"/></div>
-      <div class="form-group"><label>Keyword</label><input id="si-keyword" placeholder="async, memory…"/></div>
-      <div class="form-group"><label>Label</label><input id="si-label" placeholder="enhancement…"/></div>
-      <div class="form-group"><label>Min Age (days)</label><input id="si-min-age" type="number" placeholder="90"/></div>
-      <div class="form-group"><label>Max Age (days)</label><input id="si-max-age" type="number" placeholder=""/></div>
-      <div class="form-group"><label>Max Participants</label><input id="si-max-participants" type="number" placeholder="5"/></div>
-      <div class="form-group"><label>Min Reactions</label><input id="si-min-reactions" type="number" placeholder="10"/></div>
-      <div class="form-group"><label>Stale Only</label><input id="si-stale" type="checkbox"/></div>
-      <div class="form-group"><label>Repo Limit</label><input id="si-repo-limit" type="number" value="15"/></div>
-    </div>
-    <button id="btn-si" class="btn" onclick="runSearchIssues()">Search Issues</button>
-    <div id="si-spinner" class="spinner">Searching issues…</div>
-    <div id="si-error" class="error-box"></div>
-    <div id="si-results" style="margin-top:24px"></div>
-  </div>
+      <!-- ORG form (hidden unless active tab is 'org') -->
+      <form class="search-panel" id="search-form-org" autocomplete="off" style="display:none">
+        <div class="search-row">
+          <div class="field">
+            <label for="org-input">Organization</label>
+            <div class="input-wrap">
+              <span class="input-icon">@</span>
+              <input id="org-input" placeholder="uipath, microsoft, vercel, apache…" spellcheck="false" autocomplete="off"/>
+            </div>
+          </div>
+          <div class="field">
+            <label for="org-topic-input">Topic <span class="opt">optional filter</span></label>
+            <div class="input-wrap">
+              <span class="input-icon">#</span>
+              <input id="org-topic-input" placeholder="agents, mlops, automation…" spellcheck="false" autocomplete="off"/>
+            </div>
+          </div>
+          <button class="btn btn-primary search-btn" type="submit" id="search-btn-org">
+            <span id="search-btn-org-label">Search</span>
+            <kbd>↵</kbd>
+          </button>
+        </div>
+        <div class="search-hints">
+          <span class="hint-label">Try</span>
+          <button type="button" class="chip-suggest org-chip" data-o="microsoft" data-t=""><span class="chip-lang">microsoft</span></button>
+          <button type="button" class="chip-suggest org-chip" data-o="uipath" data-t="agents"><span class="chip-lang">uipath</span><span class="chip-sep">·</span><span class="chip-topic">agents</span></button>
+          <button type="button" class="chip-suggest org-chip" data-o="vercel" data-t=""><span class="chip-lang">vercel</span></button>
+          <button type="button" class="chip-suggest org-chip" data-o="apache" data-t=""><span class="chip-lang">apache</span></button>
+        </div>
+      </form>
 
-  <!-- ANALYZE REPO -->
-  <div id="tab-analyze-repo" class="tab-panel">
-    <div class="form-grid">
-      <div class="form-group"><label>Repo *</label><input id="ar-repo" placeholder="microsoft/vscode"/></div>
-      <div class="form-group"><label>Issues to Fetch</label><input id="ar-issues" type="number" value="50" min="20" max="100"/></div>
-    </div>
-    <button id="btn-ar" class="btn" onclick="runAnalyzeRepo()">Analyze Repo</button>
-    <div id="ar-spinner" class="spinner">Fetching repo data…</div>
-    <div id="ar-error" class="error-box"></div>
-    <div id="ar-results" style="margin-top:24px"></div>
-  </div>
+      <div id="error-slot"></div>
+      <div id="results-slot"></div>
 
-  <!-- ABANDONED REPOS -->
-  <div id="tab-abandoned" class="tab-panel">
-    <div class="form-grid">
-      <div class="form-group"><label>Language</label><input id="ab-lang" placeholder="python, rust…"/></div>
-      <div class="form-group"><label>Topic <span style="color:#475569;font-size:11px">(optional)</span></label><input id="ab-topic" placeholder="machine-learning, agents…"/></div>
-      <div class="form-group"><label>Repo Limit</label><input id="ab-repo-limit" type="number" value="30"/></div>
-    </div>
-    <button id="btn-ab" class="btn" onclick="runAbandoned()">Find Abandoned</button>
-    <div id="ab-spinner" class="spinner">Scanning repos…</div>
-    <div id="ab-error" class="error-box"></div>
-    <div id="ab-results" style="margin-top:24px"></div>
+      <footer class="footer">
+        <div class="mono small muted">gapscout · v0.4.2 · local · github + your llm</div>
+        <div class="footer-links">
+          <a href="#" onclick="return false">docs</a>
+          <a href="#" onclick="return false">mcp tools</a>
+          <a href="#" onclick="return false">changelog</a>
+        </div>
+      </footer>
+    </main>
   </div>
 </div>
+
+<div id="modal-slot"></div>
+<div id="analysis-modal-slot"></div>
 
 <script>
-let lastResult = null;
-let lastSearchType = '';
-let lastSearchLabel = '';
+(function(){
+  'use strict';
 
-const TAB_IDS = ['find-gaps','opportunities','search-issues','analyze-repo','organization','abandoned'];
+  var PROVIDERS = [
+    { id: 'anthropic',  label: 'Claude (Anthropic)',              short: 'claude',     defaultModel: 'claude-haiku-4-5',         placeholder: 'sk-ant-…', glyph: '✺' },
+    { id: 'openai',     label: 'OpenAI',                          short: 'openai',     defaultModel: 'gpt-4o-mini',              placeholder: 'sk-…',     glyph: '◎' },
+    { id: 'openrouter', label: 'OpenRouter (DeepSeek / any model)', short: 'openrouter', defaultModel: 'deepseek/deepseek-chat',   placeholder: 'sk-or-…',  glyph: '⌘' }
+  ];
 
-function switchTab(id) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => {
-    b.classList.toggle('active', TAB_IDS[i] === id);
-  });
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('tab-' + id).classList.add('active');
-  if (id === 'opportunities') renderPickedIssues();
-}
-
-function setLoading(prefix, show) {
-  document.getElementById(prefix+'-spinner').classList.toggle('show', show);
-  const btn = document.getElementById('btn-'+prefix);
-  if (btn) btn.disabled = show;
-}
-
-function showError(prefix, msg) {
-  const el = document.getElementById(prefix+'-error');
-  el.textContent = msg;
-  el.classList.add('show');
-}
-
-function clearError(prefix) {
-  document.getElementById(prefix+'-error').classList.remove('show');
-}
-
-function exportJSON(data, filename) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-}
-
-function doExport() {
-  if (!lastResult) return;
-  const lang = lastResult.language || (lastResult.repo ? lastResult.repo.replace('/','_') : 'export');
-  exportJSON(lastResult, 'gapscout-' + lang + '.json');
-}
-
-function resultsHeader(title, count) {
-  return '<div class="results-header"><h3>' + title + ' <span class="badge">' + count + '</span></h3>'
-    + '<button class="btn btn-sm" onclick="doExport()">Export JSON</button></div>';
-}
-
-function stat(val, label) {
-  return '<div><span class="insights-stat-val">' + val + '</span><span class="insights-stat-label">' + label + '</span></div>';
-}
-
-function renderSummaryPanel(data, type, searchLabel) {
-  var html = '<div class="insights-panel">';
-  html += '<div class="insights-header"><span class="insights-title">Key Insights — ' + esc(searchLabel) + '</span>';
-  html += '<button class="btn-report" onclick="downloadReport()">&#11015; Download Report</button></div>';
-  html += '<div class="insights-stats">';
-  if (type === 'gaps') {
-    html += stat(data.reposAnalyzed || 0, 'Repos');
-    html += stat((data.issuesAnalyzed || 0).toLocaleString(), 'Issues');
-    html += stat(data.featureRequestsFound || 0, 'Feature Reqs');
-    html += stat((data.gaps || []).length, 'Gaps Found');
-    html += '</div>';
-    var top3 = (data.gaps || []).slice(0, 3);
-    if (top3.length) {
-      html += '<div class="insights-top">';
-      top3.forEach(function(g, i) {
-        var cls = g.worthBuilding ? (g.worthBuilding.verdict === 'Strong opportunity' ? 'strong' : g.worthBuilding.verdict === 'Promising' ? 'promising' : g.worthBuilding.verdict === 'Niche' ? 'niche' : 'saturated') : '';
-        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(g.theme) + '</span>';
-        if (g.worthBuilding) html += '<span class="wb-badge ' + cls + ' insights-meta">' + esc(g.worthBuilding.verdict) + '</span>';
-        html += '<span class="insights-meta">score ' + g.gapScore + '</span></div>';
-      });
-      html += '</div>';
-      var best = top3[0];
-      var takeaway = best.worthBuilding ? best.worthBuilding.reasoning : (best.issueCount + ' issues, ' + best.totalReactions + ' reactions');
-      html += '<div class="insights-takeaway">Strongest gap: <strong>' + esc(best.theme) + '</strong> — ' + esc(takeaway) + '</div>';
-    }
-  } else if (type === 'opportunities' || type === 'issues') {
-    html += stat(data.reposSearched || data.reposAnalyzed || 0, 'Repos');
-    html += stat(data.totalFound || (data.issues || []).length, 'Found');
-    html += '</div>';
-    var top3 = (data.issues || []).slice(0, 3);
-    if (top3.length) {
-      html += '<div class="insights-top">';
-      top3.forEach(function(issue, i) {
-        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(issue.title.slice(0,60)) + '</span><span class="insights-meta">&#128077; ' + issue.reactions + ' · ' + issue.ageDays + 'd</span></div>';
-      });
-      html += '</div>';
-      var best = top3[0];
-      html += '<div class="insights-takeaway">Most in-demand: <strong>' + esc(best.title.slice(0,60)) + '</strong> — ' + best.reactions + ' reactions, open ' + best.ageDays + ' days</div>';
-    }
-  } else if (type === 'repo') {
-    html += stat((data.stars || 0).toLocaleString(), 'Stars');
-    html += stat(data.openIssues || 0, 'Open Issues');
-    html += stat((data.staleIssues || []).length, 'Stale');
-    html += stat((data.gaps || []).length, 'Clusters');
-    html += '</div>';
-    var top3 = (data.topIssues || []).slice(0, 3);
-    if (top3.length) {
-      html += '<div class="insights-top">';
-      top3.forEach(function(issue, i) {
-        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(issue.title.slice(0,60)) + '</span><span class="insights-meta">&#128077; ' + issue.reactions + '</span></div>';
-      });
-      html += '</div>';
-      var best = top3[0];
-      html += '<div class="insights-takeaway">Most requested: <strong>' + esc(best.title.slice(0,60)) + '</strong> — ' + best.reactions + ' reactions</div>';
-    }
-  } else if (type === 'org') {
-    html += stat(data.reposFound || 0, 'Repos');
-    html += stat((data.issuesAnalyzed || 0).toLocaleString(), 'Issues');
-    html += stat((data.gaps || []).length, 'Gaps');
-    html += stat((data.abandonedRepos || []).length, 'Abandoned');
-    html += '</div>';
-    var top3 = (data.gaps || []).slice(0, 3);
-    if (top3.length) {
-      html += '<div class="insights-top">';
-      top3.forEach(function(g, i) {
-        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(g.theme) + '</span><span class="insights-meta">score ' + Math.round(g.gapScore) + '</span></div>';
-      });
-      html += '</div>';
-      var best = top3[0];
-      var takeaway = best.worthBuilding ? best.worthBuilding.reasoning : (best.issueCount + ' issues across ' + best.affectedRepos.length + ' repos');
-      html += '<div class="insights-takeaway">Strongest gap: <strong>' + esc(best.theme) + '</strong> — ' + esc(takeaway) + '</div>';
-    }
-  } else if (type === 'abandoned') {
-    html += stat(data.reposChecked || 0, 'Checked');
-    html += stat(data.abandonedCount || 0, 'Abandoned');
-    html += '</div>';
-    var top3 = (data.abandoned || []).slice(0, 3);
-    if (top3.length) {
-      html += '<div class="insights-top">';
-      top3.forEach(function(r, i) {
-        html += '<div class="insights-row"><span class="insights-rank">' + (i+1) + '</span><span class="insights-label">' + esc(r.repo) + '</span><span class="insights-meta">&#11088; ' + (r.stars||0).toLocaleString() + '</span></div>';
-      });
-      html += '</div>';
-      var best = top3[0];
-      html += '<div class="insights-takeaway">Most popular abandoned: <strong>' + esc(best.repo) + '</strong> — ' + (best.stars||0).toLocaleString() + ' stars, last active ' + new Date(best.lastPushed).toLocaleDateString() + '</div>';
-    }
-  }
-  html += '</div>';
-  return html;
-}
-
-function generateHtmlReport(data, type, searchLabel) {
-  var date = new Date().toLocaleDateString('en-US', {year:'numeric',month:'long',day:'numeric'});
-  var css = 'body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:0}'
-    + 'header{background:#1e1b4b;border-bottom:1px solid #4f46e5;padding:20px 40px;display:flex;align-items:center;gap:16px}'
-    + 'header h1{font-size:22px;font-weight:800;color:#a5b4fc;margin:0}'
-    + 'header .sub{font-size:13px;color:#64748b}'
-    + '.container{max-width:1100px;margin:0 auto;padding:32px 40px}'
-    + '.summary-box{background:linear-gradient(135deg,#1e1b4b,#1e293b);border:1px solid #4f46e5;border-radius:12px;padding:24px;margin-bottom:28px}'
-    + '.summary-box h2{font-size:14px;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.08em;margin:0 0 16px}'
-    + '.stat-grid{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px}'
-    + '.stat-box{text-align:center}'
-    + '.stat-val{font-size:28px;font-weight:800;color:#a5b4fc;font-family:monospace;display:block}'
-    + '.stat-lbl{font-size:11px;color:#64748b;text-transform:uppercase}'
-    + '.section{margin-bottom:28px}'
-    + '.section h2{font-size:15px;font-weight:700;color:#94a3b8;border-bottom:1px solid #1e293b;padding-bottom:8px;margin-bottom:16px}'
-    + '.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:12px}'
-    + '.card-title{font-size:16px;font-weight:700;color:#f1f5f9;font-family:monospace;margin-bottom:8px}'
-    + '.meta{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:#64748b;margin-bottom:8px}'
-    + '.badge-strong{background:#14532d;color:#86efac;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
-    + '.badge-promising{background:#1e3a5f;color:#93c5fd;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
-    + '.badge-niche{background:#3d2900;color:#fcd34d;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
-    + '.badge-saturated{background:#1e1e2e;color:#64748b;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}'
-    + 'table{width:100%;border-collapse:collapse;font-size:13px}'
-    + 'th{text-align:left;padding:10px 12px;border-bottom:2px solid #334155;color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase}'
-    + 'td{padding:10px 12px;border-bottom:1px solid #1e293b;vertical-align:top}'
-    + 'a{color:#60a5fa;text-decoration:none}'
-    + '.stale{background:#451a03;color:#fb923c;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px}'
-    + 'footer{border-top:1px solid #1e293b;padding:20px 40px;text-align:center;font-size:12px;color:#475569}';
-
-  var esc2 = function(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
-  var safeHref = function(url) {
-    try { var p = new URL(url); return (p.hostname === 'github.com' && p.protocol === 'https:') ? esc2(url) : '#'; } catch(e) { return '#'; }
+  var TAB_LABELS = {
+    issues: { empty: 'Find the next issue to fix —\nbefore everyone else does.', sub: 'Pick a language and (optionally) a topic. GapScout surfaces the open issues with real demand across the GitHub ecosystem.' },
+    repos:  { empty: 'Find the repositories shaping a space.',                   sub: 'Pick a language and (optionally) a topic. GapScout lists the most active repositories pushed in that window, sorted by stars.' },
+    org:    { empty: 'Map an organization’s footprint.',                    sub: 'Type an org name (e.g. uipath, microsoft). GapScout aggregates the top topics across their public repositories.' }
   };
 
-  var body = '';
-  body += '<div class="summary-box"><h2>Executive Summary</h2><div class="stat-grid">';
-  if (type === 'gaps') {
-    body += '<div class="stat-box"><span class="stat-val">' + (data.reposAnalyzed||0) + '</span><span class="stat-lbl">Repos</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.issuesAnalyzed||0).toLocaleString() + '</span><span class="stat-lbl">Issues</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.featureRequestsFound||0) + '</span><span class="stat-lbl">Feature Reqs</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.gaps||[]).length + '</span><span class="stat-lbl">Gaps</span></div>';
-  } else if (type === 'opportunities' || type === 'issues') {
-    body += '<div class="stat-box"><span class="stat-val">' + (data.reposSearched||0) + '</span><span class="stat-lbl">Repos</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.totalFound||0) + '</span><span class="stat-lbl">Issues Found</span></div>';
-  } else if (type === 'repo') {
-    body += '<div class="stat-box"><span class="stat-val">' + (data.stars||0).toLocaleString() + '</span><span class="stat-lbl">Stars</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.openIssues||0) + '</span><span class="stat-lbl">Open Issues</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.staleIssues||[]).length + '</span><span class="stat-lbl">Stale</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.gaps||[]).length + '</span><span class="stat-lbl">Gap Clusters</span></div>';
-  } else if (type === 'org') {
-    body += '<div class="stat-box"><span class="stat-val">' + (data.reposFound||0) + '</span><span class="stat-lbl">Repos</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.issuesAnalyzed||0).toLocaleString() + '</span><span class="stat-lbl">Issues</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.gaps||[]).length + '</span><span class="stat-lbl">Gaps</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.abandonedRepos||[]).length + '</span><span class="stat-lbl">Abandoned</span></div>';
-  } else if (type === 'abandoned') {
-    body += '<div class="stat-box"><span class="stat-val">' + (data.reposChecked||0) + '</span><span class="stat-lbl">Checked</span></div>';
-    body += '<div class="stat-box"><span class="stat-val">' + (data.abandonedCount||0) + '</span><span class="stat-lbl">Abandoned</span></div>';
-  }
-  body += '</div></div>';
-
-  if (type === 'gaps' || type === 'org') {
-    if (data.gaps && data.gaps.length) {
-      body += '<div class="section"><h2>Gap Analysis</h2>';
-      data.gaps.forEach(function(gap) {
-        var wb = gap.worthBuilding;
-        var vcls = wb ? (wb.verdict === 'Strong opportunity' ? 'badge-strong' : wb.verdict === 'Promising' ? 'badge-promising' : wb.verdict === 'Niche' ? 'badge-niche' : 'badge-saturated') : '';
-        body += '<div class="card"><div class="card-title">' + esc2(gap.theme) + (wb ? ' <span class="' + vcls + '">' + esc2(wb.verdict) + '</span> <span style="color:#94a3b8;font-size:13px">' + wb.overall + '/100</span>' : '') + '</div>';
-        body += '<div class="meta"><span>' + gap.issueCount + ' issues</span><span>' + gap.totalReactions + ' reactions</span><span>' + (gap.affectedRepos||[]).length + ' repos</span><span>avg ' + gap.avgAgeDays + 'd old</span></div>';
-        if (wb) body += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">' + esc2(wb.reasoning) + '</div>';
-        if (gap.registrySignal && gap.registrySignal.totalMonthlyDownloads > 0) {
-          var dl = gap.registrySignal.totalMonthlyDownloads;
-          var dlStr = dl >= 1000000 ? (dl/1000000).toFixed(1)+'M' : dl >= 1000 ? Math.round(dl/1000)+'k' : String(dl);
-          body += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">&#128230; ' + dlStr + ' downloads/mo via ' + esc2(gap.registrySignal.registry) + '</div>';
-        }
-        if (gap.sampleIssues && gap.sampleIssues.length) {
-          body += '<div style="font-size:12px;color:#94a3b8;margin-top:8px;margin-bottom:4px">Sample issues:</div>';
-          gap.sampleIssues.forEach(function(i) {
-            body += '<div style="padding:3px 0"><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,90)) + '</a> <span style="color:#64748b">&#128077; ' + i.reactions + '</span></div>';
-          });
-        }
-        body += '</div>';
-      });
-      body += '</div>';
-    }
-    if (type === 'org' && data.repos && data.repos.length) {
-      body += '<div class="section"><h2>Repositories</h2><table><thead><tr><th>Repo</th><th>Stars</th><th>Open Issues</th><th>Last Pushed</th><th>Status</th></tr></thead><tbody>';
-      data.repos.forEach(function(r) {
-        var d = r.lastPushed ? new Date(r.lastPushed).toLocaleDateString() : 'N/A';
-        body += '<tr><td><a href="https://github.com/' + esc2(r.fullName) + '">' + esc2(r.fullName) + '</a></td><td>' + (r.stars||0).toLocaleString() + '</td><td>' + (r.openIssues||0) + '</td><td>' + d + '</td><td>' + (r.isAbandoned ? '<span class="stale">abandoned</span>' : 'active') + '</td></tr>';
-      });
-      body += '</tbody></table></div>';
-    }
-  } else if (type === 'opportunities' || type === 'issues') {
-    if (data.issues && data.issues.length) {
-      body += '<div class="section"><h2>Issues</h2><table><thead><tr><th>Repo</th><th>Title</th><th>Age</th><th>Reactions</th><th>Participants</th></tr></thead><tbody>';
-      data.issues.forEach(function(i) {
-        body += '<tr><td style="font-family:monospace;font-size:11px">' + esc2(i.repo) + '</td><td><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,80)) + '</a>' + (i.isStale ? ' <span class="stale">stale</span>' : '') + '</td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td><td>' + i.participantCount + '</td></tr>';
-      });
-      body += '</tbody></table></div>';
-    }
-  } else if (type === 'repo') {
-    if (data.topIssues && data.topIssues.length) {
-      body += '<div class="section"><h2>Top Issues by Demand</h2><table><thead><tr><th>Title</th><th>Reactions</th><th>Age</th></tr></thead><tbody>';
-      data.topIssues.forEach(function(i) {
-        body += '<tr><td><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,90)) + '</a></td><td>' + i.reactions + '</td><td>' + i.ageDays + 'd</td></tr>';
-      });
-      body += '</tbody></table></div>';
-    }
-    if (data.staleIssues && data.staleIssues.length) {
-      body += '<div class="section"><h2>Stale Issues</h2><table><thead><tr><th>Title</th><th>Age</th><th>Reactions</th></tr></thead><tbody>';
-      data.staleIssues.slice(0,20).forEach(function(i) {
-        body += '<tr><td><a href="' + safeHref(i.url) + '">' + esc2(i.title.slice(0,80)) + '</a></td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td></tr>';
-      });
-      body += '</tbody></table></div>';
-    }
-    if (data.gaps && data.gaps.length) {
-      body += '<div class="section"><h2>Gap Clusters</h2>';
-      data.gaps.forEach(function(gap) {
-        body += '<div class="card"><div class="card-title">' + esc2(gap.theme) + '</div>';
-        body += '<div class="meta"><span>' + gap.issueCount + ' issues</span><span>' + gap.totalReactions + ' reactions</span></div></div>';
-      });
-      body += '</div>';
-    }
-  } else if (type === 'abandoned') {
-    if (data.abandoned && data.abandoned.length) {
-      body += '<div class="section"><h2>Abandoned Repositories</h2><table><thead><tr><th>Repo</th><th>Stars</th><th>Last Pushed</th><th>Open Issues</th></tr></thead><tbody>';
-      data.abandoned.forEach(function(r) {
-        var d = new Date(r.lastPushed).toLocaleDateString();
-        body += '<tr><td><a href="https://github.com/' + esc2(r.repo) + '">' + esc2(r.repo) + '</a></td><td>' + (r.stars||0).toLocaleString() + '</td><td>' + d + '</td><td>' + r.openIssues + '</td></tr>';
-      });
-      body += '</tbody></table></div>';
-    }
+  var LANG_COLOR = {
+    Python: '#3776AB', TypeScript: '#3178C6', JavaScript: '#F1E05A',
+    Go: '#00ADD8', Rust: '#DEA584', 'C++': '#F34B7D', C: '#555555',
+    Java: '#B07219', Kotlin: '#A97BFF', Swift: '#FA7343',
+    Ruby: '#701516', PHP: '#4F5D95', Shell: '#89E051', Lua: '#000080',
+    HTML: '#E34C26', CSS: '#563D7C', Vue: '#41B883'
+  };
+  function normalizeLang(l) {
+    if (!l) return '';
+    var x = String(l).trim();
+    var lower = x.toLowerCase();
+    var map = { python:'Python', typescript:'TypeScript', javascript:'JavaScript', go:'Go', rust:'Rust', 'c++':'C++', cpp:'C++', c:'C', java:'Java', kotlin:'Kotlin', swift:'Swift', ruby:'Ruby', php:'PHP', shell:'Shell', bash:'Shell' };
+    return map[lower] || x.charAt(0).toUpperCase() + x.slice(1);
   }
 
-  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>GapScout Report — ' + esc2(searchLabel) + '</title><style>' + css + '</style></head>'
-    + '<body><header><h1>GapScout</h1><div class="sub">' + esc2(searchLabel) + ' · Generated ' + date + '</div></header>'
-    + '<div class="container">' + body + '</div>'
-    + '<footer>Generated by GapScout · github.com/sowmyaarajan/gapscout</footer></body></html>';
-}
+  var state = {
+    activeTab: 'issues',
+    issues: { searched: null, searching: false, timeframe: 'weekly', dataByTf: {}, loadingTf: false },
+    repos:  { searched: null, searching: false, timeframe: 'weekly', dataByTf: {}, loadingTf: false },
+    org:    { info: null, topics: [], searching: false, query: null },
+    analyses: {},           // keyed by 'issue:<repo>#<num>', 'repo:<full>', 'topic:<org>::<name>'
+    analysing: {},
+    analysisOpenFor: null,
+    settings: loadSettings(),
+    settingsOpen: false,
+    modalDraft: null,
+    error: ''
+  };
+  function cur() { return state[state.activeTab]; }
 
-function downloadReport() {
-  if (!lastResult) return;
-  var html = generateHtmlReport(lastResult, lastSearchType, lastSearchLabel);
-  var blob = new Blob([html], {type: 'text/html'});
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  var slug = lastSearchLabel.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 40);
-  a.download = 'gapscout-' + slug + '-' + new Date().toISOString().slice(0, 10) + '.html';
-  a.click();
-  URL.revokeObjectURL(url);
-}
+  function loadSettings() {
+    try {
+      var s = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
+      return {
+        provider: s.provider || 'openrouter',
+        apiKey: s.apiKey || '',
+        model: s.model || 'deepseek/deepseek-chat'
+      };
+    } catch (e) {
+      return { provider: 'openrouter', apiKey: '', model: 'deepseek/deepseek-chat' };
+    }
+  }
+  function saveSettings(s) {
+    state.settings = { provider: s.provider, apiKey: s.apiKey, model: s.model };
+    localStorage.setItem('gapscout-ai-settings', JSON.stringify(state.settings));
+    updateProviderPill();
+  }
 
-// ── FIND GAPS — 3-STEP FLOW ─────────────────────────────────────
-var _trendingLang = '';
-var _trendingTopic = '';
-var _trendingIssues = [];
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function issueKey(it) { return (it.repo || '') + '#' + (it.number || ''); }
 
-async function runGapsSearch() {
-  clearError('fg');
-  const lang = document.getElementById('fg-lang').value.trim();
-  const topic = document.getElementById('fg-topic').value.trim();
-  if (!lang && !topic) { showError('fg', 'Provide a language or topic (e.g. python, machine-learning)'); return; }
-  _trendingLang = lang;
-  _trendingTopic = topic;
-  setLoading('fg', true);
-  document.getElementById('fg-count-section').style.display = 'none';
-  document.getElementById('fg-results').innerHTML = '';
-  try {
-    const params = new URLSearchParams();
-    if (lang) params.set('language', lang);
-    if (topic) params.set('topic', topic);
-    const res = await fetch('/api/count-issues?' + params.toString());
-    const data = await res.json();
-    if (data.error) { showError('fg', data.error); return; }
-    document.getElementById('fg-count-display').innerHTML =
-      'Found <span>' + data.totalCount.toLocaleString() + '</span> open issues on GitHub';
-    document.getElementById('fg-count-section').style.display = 'block';
-    // auto-load weekly by default
-    loadTrending('weekly', document.getElementById('tf-weekly'));
-  } catch(e) { showError('fg', e.message); }
-  finally { setLoading('fg', false); }
-}
+  function tfCount(tf) { return tf === 'daily' ? 20 : tf === 'weekly' ? 30 : 50; }
+  function tfDays(tf)  { return tf === 'daily' ?  1 : tf === 'weekly' ?  7 : 30; }
+  function tfWindow(tf){ return tf === 'daily' ? '24 hours' : tf === 'weekly' ? '7 days' : '30 days'; }
 
-async function loadTrending(timeframe, btn) {
-  document.querySelectorAll('.tf-btn').forEach(function(b) { b.classList.remove('active'); });
-  if (btn) btn.classList.add('active');
-  const spinner = document.getElementById('fg-trending-spinner');
-  spinner.style.display = 'block';
-  document.getElementById('fg-results').innerHTML = '';
-  try {
-    const res = await fetch('/api/trending-issues', {
+  function formatAge(d, h) {
+    if (d == null) return '';
+    if (d === 0 && h === 0) return 'just now';
+    if (d === 0) return h + 'h ago';
+    if (d === 1) return '1d ago';
+    return d + 'd ago';
+  }
+
+  function safeLabelClass(l) {
+    return 'label label-' + String(l || '').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  }
+
+  // ---------- API ----------
+  function apiCount(lang, topic) {
+    var p = new URLSearchParams();
+    if (lang) p.set('language', lang);
+    if (topic) p.set('topic', topic);
+    return fetch('/api/count-issues?' + p.toString()).then(function(r){ return r.json(); });
+  }
+  function apiTrending(lang, topic, tf) {
+    return fetch('/api/trending-issues', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ language: _trendingLang, topic: _trendingTopic, timeframe: timeframe }),
-    });
-    const data = await res.json();
-    if (data.error) { showError('fg', data.error); spinner.style.display = 'none'; return; }
-    lastResult = data;
-    lastSearchType = 'issues';
-    lastSearchLabel = _trendingLang || _trendingTopic || 'search';
-    _trendingIssues = data.issues || [];
-    renderTrendingIssues(_trendingIssues, timeframe);
-  } catch(e) { showError('fg', e.message); }
-  finally { spinner.style.display = 'none'; }
-}
-
-function renderTrendingIssues(issues, timeframe) {
-  const el = document.getElementById('fg-results');
-  if (!issues || !issues.length) {
-    el.innerHTML = '<p style="color:#64748b">No trending issues found for this timeframe. Try Weekly or Monthly.</p>';
-    return;
+      body: JSON.stringify({ language: lang, topic: topic || undefined, timeframe: tf })
+    }).then(function(r){ return r.json(); });
   }
-  const label = timeframe === 'daily' ? 'today' : timeframe === 'weekly' ? 'this week' : 'this month';
-  const aiSettings = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
-  const hasKey = !!aiSettings.apiKey;
-  var html = '<p style="color:#64748b;font-size:13px;margin-bottom:16px">Top ' + issues.length + ' issues trending ' + label + ' · sorted by reactions</p>';
-  issues.forEach(function(issue, idx) {
-    html += '<div class="trend-card" id="tc-' + idx + '">';
-    html += '<div class="trend-card-header">';
-    html += '<a class="trend-card-title" href="' + safeUrl(issue.url) + '" target="_blank">' + esc(issue.title.slice(0, 100)) + '</a>';
-    if (hasKey) {
-      html += '<button class="btn-analyse" onclick="analyseIssue(' + idx + ', this)">Analyse</button>';
-    } else {
-      html += '<button class="btn-analyse" disabled title="Configure AI key in &#9881; AI Settings">Analyse</button>';
-    }
-    html += '</div>';
-    html += '<div class="trend-card-meta">';
-    html += '<span style="font-family:monospace;font-size:11px;color:#3b82f6">' + esc(issue.repo) + '</span>';
-    html += '<span>&#128077; ' + issue.reactions + '</span>';
-    html += '<span>&#128336; ' + issue.ageDays + 'd old</span>';
-    html += '<span>&#128172; ' + issue.comments + '</span>';
-    if (issue.isStale) html += '<span class="stale-badge">stale</span>';
-    var labelTags = (issue.labels || []).slice(0, 3).map(function(l) { return '<span class="label-tag">' + esc(l) + '</span>'; }).join('');
-    if (labelTags) html += labelTags;
-    html += '</div>';
-    html += '<div class="analysis-box" id="abox-' + idx + '"></div>';
-    html += '</div>';
-  });
-  el.innerHTML = html;
-}
-
-async function analyseIssue(idx, btn) {
-  const issue = _trendingIssues[idx];
-  if (!issue) return;
-  const aiSettings = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
-  if (!aiSettings.apiKey) { alert('Please configure your AI key in ⚙ AI Settings first.'); return; }
-  btn.textContent = 'Analysing…';
-  btn.disabled = true;
-  try {
-    const res = await fetch('/api/analyse', {
+  function apiAnalyse(issue) {
+    var s = state.settings;
+    var providerForApi = s.provider === 'anthropic' ? 'claude' : s.provider;
+    return fetch('/api/analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: aiSettings.apiKey,
-        provider: aiSettings.provider || 'claude',
-        model: aiSettings.model || '',
+        apiKey: s.apiKey,
+        provider: providerForApi,
+        model: s.model || providerInfo(s.provider).defaultModel,
         repo: issue.repo,
         issueTitle: issue.title,
         issueBody: issue.body || '',
-        labels: issue.labels || [],
-      }),
-    });
-    const data = await res.json();
-    if (data.error) { btn.textContent = 'Analyse'; btn.disabled = false; alert('Error: ' + data.error); return; }
-    const box = document.getElementById('abox-' + idx);
-    box.innerHTML = data.summary
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\n/g, '<br>');
-    box.classList.add('show');
-    btn.textContent = 'Analysed ✓';
-  } catch(e) {
-    btn.textContent = 'Analyse';
-    btn.disabled = false;
-    alert('Analysis failed: ' + e.message);
-  }
-}
-
-// ── AI SETTINGS ─────────────────────────────────────────────────
-var PROVIDER_MODELS = { claude: 'claude-sonnet-4-6', openai: 'gpt-4o', openrouter: 'deepseek/deepseek-chat' };
-
-function openSettings() {
-  const s = JSON.parse(localStorage.getItem('gapscout-ai-settings') || '{}');
-  document.getElementById('ai-provider').value = s.provider || 'claude';
-  document.getElementById('ai-key').value = s.apiKey || '';
-  document.getElementById('ai-model').value = s.model || PROVIDER_MODELS[s.provider || 'claude'];
-  document.getElementById('settings-saved').style.display = 'none';
-  document.getElementById('settings-overlay').style.display = 'flex';
-}
-
-function closeSettings() {
-  document.getElementById('settings-overlay').style.display = 'none';
-}
-
-function onProviderChange() {
-  const p = document.getElementById('ai-provider').value;
-  document.getElementById('ai-model').value = PROVIDER_MODELS[p] || '';
-}
-
-function saveSettings() {
-  const settings = {
-    provider: document.getElementById('ai-provider').value,
-    apiKey: document.getElementById('ai-key').value.trim(),
-    model: document.getElementById('ai-model').value.trim(),
-  };
-  localStorage.setItem('gapscout-ai-settings', JSON.stringify(settings));
-  document.getElementById('settings-saved').style.display = 'inline';
-  setTimeout(closeSettings, 1200);
-}
-
-function renderGaps(containerId, data) {
-  const el = document.getElementById(containerId);
-  if (!data.gaps || !data.gaps.length) { el.innerHTML = '<p style="color:#64748b">No gaps found.</p>'; return; }
-  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
-  html += resultsHeader('Gaps Found', data.gaps.length);
-  html += '<p style="color:#64748b;font-size:13px;margin-bottom:16px">Analyzed ' + data.reposAnalyzed + ' repos · ' + data.issuesAnalyzed + ' issues · ' + data.featureRequestsFound + ' feature requests</p>';
-  for (const gap of data.gaps) {
-    html += '<div class="gap-card">';
-    html += '<div class="gap-card-header"><span class="gap-theme">' + esc(gap.theme) + '</span><span class="gap-score">Score: ' + gap.gapScore + '</span></div>';
-    html += '<div class="gap-meta">';
-    html += '<span class="meta-item"><strong>' + gap.issueCount + '</strong> issues</span>';
-    html += '<span class="meta-item"><strong>' + gap.totalReactions + '</strong> reactions</span>';
-    html += '<span class="meta-item"><strong>' + gap.affectedRepos.length + '</strong> repos</span>';
-    html += '<span class="meta-item">avg age <strong>' + gap.avgAgeDays + 'd</strong></span>';
-    html += '<span class="meta-item">velocity <strong>' + gap.velocityScore + '</strong></span>';
-    html += '</div>';
-    if (gap.worthBuilding) {
-      const wb = gap.worthBuilding;
-      const cls = wb.verdict === 'Strong opportunity' ? 'strong' : wb.verdict === 'Promising' ? 'promising' : wb.verdict === 'Niche' ? 'niche' : 'saturated';
-      html += '<div class="worth-building">';
-      html += '<div><span class="wb-badge ' + cls + '">⚡ ' + esc(wb.verdict) + '</span><span class="wb-score-num">' + wb.overall + '/100</span></div>';
-      html += '<div class="wb-reasoning">' + esc(wb.reasoning) + '</div>';
-      html += '<div class="wb-breakdown">';
-      [['Demand', wb.demand], ['Market', wb.marketSize], ['Urgency', wb.urgency], ['Competition', wb.competition], ['Breadth', wb.breadth]].forEach(function(d) {
-        html += '<div class="wb-dim"><div class="wb-dim-label">' + d[0] + '</div><div class="wb-dim-bar-wrap"><div class="wb-dim-bar" style="width:' + d[1] + '%"></div></div><div class="wb-dim-val">' + d[1] + '</div></div>';
-      });
-      html += '</div>';
-      if (gap.registrySignal && gap.registrySignal.registry !== 'none' && gap.registrySignal.totalMonthlyDownloads > 0) {
-        const rs = gap.registrySignal;
-        const dlFmt = rs.totalMonthlyDownloads >= 1000000 ? (rs.totalMonthlyDownloads/1000000).toFixed(1)+'M' : rs.totalMonthlyDownloads >= 1000 ? Math.round(rs.totalMonthlyDownloads/1000)+'k' : rs.totalMonthlyDownloads;
-        const pkgNames = rs.topPackages.slice(0,3).map(function(p){return esc(p.name);}).join(', ');
-        html += '<div class="registry-signal">📦 <strong>' + dlFmt + '</strong> downloads/mo via ' + esc(rs.registry) + (pkgNames ? ' (' + pkgNames + ')' : '') + '</div>';
-      }
-      html += '</div>';
-    }
-    if (gap.keywords.length) {
-      html += '<div class="keywords">' + gap.keywords.map(k => '<span class="kw-tag">' + esc(k) + '</span>').join('') + '</div>';
-    }
-    html += '<div class="issues-list">' + gap.sampleIssues.map(i =>
-      '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,90)) + '</a>'
-    ).join('') + '</div>';
-    html += '</div>';
-  }
-  el.innerHTML = html;
-}
-
-async function runSearchIssues() {
-  clearError('si');
-  const lang = document.getElementById('si-lang').value.trim();
-  const topic = document.getElementById('si-topic').value.trim();
-  const kw = document.getElementById('si-keyword').value.trim();
-  if (!lang && !topic && !kw) { showError('si','Provide a language, topic, or keyword'); return; }
-  setLoading('si', true);
-  document.getElementById('si-results').innerHTML = '';
-  try {
-    const body = { language: lang, repoLimit: +document.getElementById('si-repo-limit').value };
-    if (topic) body.topic = topic;
-    const label = document.getElementById('si-label').value.trim();
-    const minAge = document.getElementById('si-min-age').value;
-    const maxAge = document.getElementById('si-max-age').value;
-    const maxP = document.getElementById('si-max-participants').value;
-    const minR = document.getElementById('si-min-reactions').value;
-    if (kw) body.keyword = kw;
-    if (label) body.label = label;
-    if (minAge) body.minAgeDays = +minAge;
-    if (maxAge) body.maxAgeDays = +maxAge;
-    if (maxP) body.maxParticipants = +maxP;
-    if (minR) body.minReactions = +minR;
-    body.isStale = document.getElementById('si-stale').checked;
-
-    const res = await fetch('/api/search-issues', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (data.error) { showError('si', data.error); return; }
-    lastResult = data;
-    lastSearchType = 'issues';
-    lastSearchLabel = [lang, topic, kw].filter(Boolean).join(' ') || 'search';
-    renderIssuesTable('si-results', data);
-  } catch(e) { showError('si', e.message); }
-  finally { setLoading('si', false); }
-}
-
-function renderIssuesTable(containerId, data) {
-  const el = document.getElementById(containerId);
-  if (!data.issues || !data.issues.length) { el.innerHTML = '<p style="color:#64748b">No issues found matching filters.</p>'; return; }
-  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
-  html += resultsHeader('Issues Found', data.totalFound);
-  html += '<table><thead><tr><th>Repo</th><th>Title</th><th>Age</th><th>Reactions</th><th>Participants</th><th>Labels</th></tr></thead><tbody>';
-  for (const i of data.issues) {
-    html += '<tr>';
-    html += '<td style="white-space:nowrap;font-family:monospace;font-size:12px">' + esc(i.repo) + '</td>';
-    html += '<td><a href="' + safeUrl(i.url) + '" target="_blank">' + esc(i.title.slice(0,80)) + '</a>' + (i.isStale ? ' <span class="stale-badge">stale</span>' : '') + '</td>';
-    html += '<td style="white-space:nowrap">' + i.ageDays + 'd</td>';
-    html += '<td>' + i.reactions + '</td>';
-    html += '<td>' + i.participantCount + '</td>';
-    html += '<td>' + (i.labels || []).slice(0,3).map(l => '<span class="label-tag">' + esc(l) + '</span>').join('') + '</td>';
-    html += '</tr>';
-  }
-  html += '</tbody></table>';
-  el.innerHTML = html;
-}
-
-async function runAnalyzeRepo() {
-  clearError('ar');
-  const repo = document.getElementById('ar-repo').value.trim();
-  if (!repo) { showError('ar','Repo is required (e.g. microsoft/vscode)'); return; }
-  setLoading('ar', true);
-  document.getElementById('ar-results').innerHTML = '';
-  try {
-    const res = await fetch('/api/analyze-repo', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ repo, issuesPerPage: +document.getElementById('ar-issues').value })
-    });
-    const data = await res.json();
-    if (data.error) { showError('ar', data.error); return; }
-    lastResult = data;
-    lastSearchType = 'repo';
-    lastSearchLabel = repo;
-    renderRepoAnalysis('ar-results', data);
-  } catch(e) { showError('ar', e.message); }
-  finally { setLoading('ar', false); }
-}
-
-function renderRepoAnalysis(containerId, d) {
-  const el = document.getElementById(containerId);
-  let html = renderSummaryPanel(d, lastSearchType, lastSearchLabel);
-  html += '<div class="results-header"><h3>' + esc(d.repo) + '</h3><button class="btn btn-sm" onclick="doExport()">Export JSON</button></div>';
-  html += '<div class="repo-info">';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (d.stars||0).toLocaleString() + '</div><div class="repo-stat-label">Stars</div></div>';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (d.openIssues||0).toLocaleString() + '</div><div class="repo-stat-label">Open Issues</div></div>';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (d.staleIssues||[]).length + '</div><div class="repo-stat-label">Stale Issues</div></div>';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (d.gaps||[]).length + '</div><div class="repo-stat-label">Gap Clusters</div></div>';
-  html += '</div>';
-
-  // Top Issues
-  html += '<div class="section"><h4>Top Issues by Demand</h4>';
-  html += '<div class="issues-list">' + (d.topIssues||[]).map(i =>
-    '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,90)) + (i.isStale ? ' <span class="stale-badge">stale</span>' : '') + '</a>'
-  ).join('') + '</div></div>';
-
-  // Gaps
-  if (d.gaps && d.gaps.length) {
-    html += '<div class="section"><h4>Gap Clusters</h4>';
-    for (const gap of d.gaps) {
-      html += '<div class="gap-card">';
-      html += '<div class="gap-card-header"><span class="gap-theme">' + esc(gap.theme) + '</span><span class="gap-score">Score: ' + gap.gapScore + '</span></div>';
-      html += '<div class="gap-meta"><span class="meta-item"><strong>' + gap.issueCount + '</strong> issues</span><span class="meta-item"><strong>' + gap.totalReactions + '</strong> reactions</span><span class="meta-item">avg age <strong>' + gap.avgAgeDays + 'd</strong></span></div>';
-      if (gap.keywords.length) html += '<div class="keywords">' + gap.keywords.map(k => '<span class="kw-tag">' + esc(k) + '</span>').join('') + '</div>';
-      html += '<div class="issues-list">' + (gap.sampleIssues||[]).map(i => '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,80)) + '</a>').join('') + '</div>';
-      html += '</div>';
-    }
-    html += '</div>';
-  }
-
-  // Age Distribution
-  if (d.ageDistribution) {
-    const maxCount = Math.max(...d.ageDistribution.map(b => b.count), 1);
-    html += '<div class="section"><h4>Issue Age Distribution</h4>';
-    for (const b of d.ageDistribution) {
-      html += '<div class="bar-row"><span class="bar-label">' + b.bucket + '</span><div class="bar-track"><div class="bar-fill" style="width:' + Math.round(b.count/maxCount*100) + '%"></div></div><span class="bar-count">' + b.count + '</span></div>';
-    }
-    html += '</div>';
-  }
-
-  // Label Breakdown
-  if (d.labelBreakdown && d.labelBreakdown.length) {
-    const maxCount = Math.max(...d.labelBreakdown.map(l => l.count), 1);
-    html += '<div class="section"><h4>Label Breakdown</h4>';
-    for (const l of d.labelBreakdown) {
-      html += '<div class="bar-row"><span class="bar-label" style="font-size:11px">' + esc(l.label.slice(0,16)) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + Math.round(l.count/maxCount*100) + '%"></div></div><span class="bar-count">' + l.count + '</span></div>';
-    }
-    html += '</div>';
-  }
-
-  // Stale Issues
-  if (d.staleIssues && d.staleIssues.length) {
-    html += '<div class="section"><h4>Stale Issues (' + d.staleIssues.length + ')</h4><table><thead><tr><th>Title</th><th>Age</th><th>Reactions</th></tr></thead><tbody>';
-    for (const i of d.staleIssues.slice(0,20)) {
-      html += '<tr><td><a href="' + safeUrl(i.url) + '" target="_blank">' + esc(i.title.slice(0,80)) + '</a></td><td>' + i.ageDays + 'd</td><td>' + i.reactions + '</td></tr>';
-    }
-    html += '</tbody></table></div>';
-  }
-
-  el.innerHTML = html;
-}
-
-async function runAbandoned() {
-  clearError('ab');
-  const lang = document.getElementById('ab-lang').value.trim();
-  const topic = document.getElementById('ab-topic').value.trim();
-  if (!lang && !topic) { showError('ab','Provide a language or topic'); return; }
-  setLoading('ab', true);
-  document.getElementById('ab-results').innerHTML = '';
-  try {
-    const repoLimit = document.getElementById('ab-repo-limit').value;
-    const topicParam = topic ? '&topic=' + encodeURIComponent(topic) : '';
-    const res = await fetch('/api/abandoned/' + encodeURIComponent(lang) + '?repoLimit=' + repoLimit + topicParam);
-    const data = await res.json();
-    if (data.error) { showError('ab', data.error); return; }
-    lastResult = data;
-    lastSearchType = 'abandoned';
-    lastSearchLabel = lang || topic || 'repos';
-    renderAbandoned('ab-results', data);
-  } catch(e) { showError('ab', e.message); }
-  finally { setLoading('ab', false); }
-}
-
-function renderAbandoned(containerId, data) {
-  const el = document.getElementById(containerId);
-  if (!data.abandoned || !data.abandoned.length) { el.innerHTML = '<p style="color:#64748b">No abandoned repos found in top ' + data.reposChecked + '.</p>'; return; }
-  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
-  html += resultsHeader('Abandoned Repos', data.abandonedCount);
-  html += '<table><thead><tr><th>Repo</th><th>Stars</th><th>Last Pushed</th><th>Open Issues</th></tr></thead><tbody>';
-  for (const r of data.abandoned) {
-    const d = new Date(r.lastPushed).toLocaleDateString();
-    html += '<tr><td><a href="https://github.com/' + r.repo + '" target="_blank">' + esc(r.repo) + '</a></td><td>' + (r.stars||0).toLocaleString() + '</td><td>' + d + '</td><td>' + r.openIssues + '</td></tr>';
-  }
-  html += '</tbody></table>';
-  el.innerHTML = html;
-}
-
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function safeUrl(url) {
-  try {
-    const p = new URL(url);
-    return (p.hostname === 'github.com' && p.protocol === 'https:') ? esc(url) : '#';
-  } catch { return '#'; }
-}
-
-// ── OPPORTUNITIES ──────────────────────────────────────────────
-let opportunities = [];
-
-async function runOpportunities() {
-  clearError('op');
-  const lang = document.getElementById('op-lang').value.trim();
-  const topic = document.getElementById('op-topic').value.trim();
-  if (!lang && !topic) { showError('op','Provide a language or topic'); return; }
-  setLoading('op', true);
-  document.getElementById('op-cards').innerHTML = '';
-  try {
-    const opBody = {
-      language: lang,
-      maxParticipants: +document.getElementById('op-max-participants').value || 3,
-      minReactions:    +document.getElementById('op-min-reactions').value || 5,
-      minAgeDays:      +document.getElementById('op-min-age').value || 30,
-      repoLimit: 15, issuesPerRepo: 50,
-    };
-    if (topic) opBody.topic = topic;
-    const res = await fetch('/api/search-issues', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(opBody)
-    });
-    const data = await res.json();
-    if (data.error) { showError('op', data.error); return; }
-    lastResult = data;
-    opportunities = data.issues || [];
-    lastSearchType = 'opportunities';
-    lastSearchLabel = lang || topic || 'search';
-    renderOpportunityCards();
-    renderPickedIssues();
-  } catch(e) { showError('op', e.message); }
-  finally { setLoading('op', false); }
-}
-
-function shuffleOpportunities() {
-  if (!opportunities.length) return;
-  for (let i = opportunities.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [opportunities[i], opportunities[j]] = [opportunities[j], opportunities[i]];
-  }
-  renderOpportunityCards();
-}
-
-function renderOpportunityCards() {
-  const el = document.getElementById('op-cards');
-  if (!opportunities.length) { el.innerHTML = '<p style="color:#64748b">No opportunities found. Try lowering Min Reactions or Min Age.</p>'; return; }
-  const picked = JSON.parse(localStorage.getItem('gapscout-picked') || '[]');
-  const pickedUrls = new Set(picked.map(function(p) { return p.url; }));
-  let html = renderSummaryPanel(lastResult || {reposSearched:0,totalFound:opportunities.length,issues:opportunities}, lastSearchType, lastSearchLabel);
-  html += '<p style="color:#64748b;font-size:13px;margin-bottom:16px">' + opportunities.length + ' opportunities found</p>';
-  opportunities.slice(0, 25).forEach(function(issue, idx) {
-    const isPickedUp = pickedUrls.has(issue.url);
-    html += '<div class="opp-card">';
-    html += '<div class="opp-card-title">' + esc(issue.title) + '</div>';
-    html += '<div style="font-size:11px;color:#3b82f6;font-family:monospace">' + esc(issue.repo) + '</div>';
-    html += '<div class="opp-card-meta">';
-    html += '<span>👍 ' + issue.reactions + '</span>';
-    html += '<span>🕐 ' + issue.ageDays + 'd old</span>';
-    html += '<span>👥 ' + issue.participantCount + ' participants</span>';
-    if (issue.isStale) html += '<span class="stale-badge">stale</span>';
-    html += '</div>';
-    html += '<div class="opp-card-actions">';
-    html += '<a class="btn-github" href="' + safeUrl(issue.url) + '" target="_blank">Open on GitHub</a>';
-    if (isPickedUp) {
-      html += '<button class="btn-pickup picked" disabled>Picked Up</button>';
-    } else {
-      html += '<button class="btn-pickup" onclick="pickUpByIndex(' + idx + ')">Pick Up</button>';
-    }
-    html += '</div></div>';
-  });
-  el.innerHTML = html;
-}
-
-function pickUpByIndex(idx) {
-  const issue = opportunities[idx];
-  if (!issue) return;
-  const picked = JSON.parse(localStorage.getItem('gapscout-picked') || '[]');
-  if (!picked.find(function(p) { return p.url === issue.url; })) {
-    picked.push({ title: issue.title, repo: issue.repo, url: issue.url, reactions: issue.reactions, ageDays: issue.ageDays });
-    localStorage.setItem('gapscout-picked', JSON.stringify(picked));
-  }
-  renderOpportunityCards();
-  renderPickedIssues();
-}
-
-function removePickedIssue(idx) {
-  const picked = JSON.parse(localStorage.getItem('gapscout-picked') || '[]');
-  picked.splice(idx, 1);
-  localStorage.setItem('gapscout-picked', JSON.stringify(picked));
-  renderPickedIssues();
-  renderOpportunityCards();
-}
-
-function renderPickedIssues() {
-  const el = document.getElementById('op-picked');
-  if (!el) return;
-  const picked = JSON.parse(localStorage.getItem('gapscout-picked') || '[]');
-  if (!picked.length) { el.innerHTML = ''; return; }
-  let html = '<div class="picked-section"><h4>My Picked Issues (' + picked.length + ')</h4>';
-  picked.forEach(function(issue, idx) {
-    html += '<div class="picked-item">';
-    html += '<a href="' + safeUrl(issue.url) + '" target="_blank">' + esc(issue.title.slice(0,70)) + '</a>';
-    html += '<span class="repo-name">' + esc(issue.repo) + '</span>';
-    html += '<span style="color:#64748b;font-size:11px">' + issue.ageDays + 'd</span>';
-    html += '<button class="btn-remove" onclick="removePickedIssue(' + idx + ')">✕</button>';
-    html += '</div>';
-  });
-  html += '</div>';
-  el.innerHTML = html;
-}
-
-// ── ORGANIZATION ───────────────────────────────────────────────
-async function runOrgAnalysis() {
-  clearError('og');
-  const org = document.getElementById('og-org').value.trim();
-  if (!org) { showError('og','Organization name is required'); return; }
-  setLoading('og', true);
-  document.getElementById('og-results').innerHTML = '';
-  try {
-    const langVal = document.getElementById('og-lang').value.trim();
-    const res = await fetch('/api/analyze-org', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        org,
-        repoLimit:      +document.getElementById('og-repo-limit').value || 20,
-        language:       langVal || undefined,
-        issuesPerRepo:  +document.getElementById('og-issues-per-repo').value || 30,
-        topGaps:        +document.getElementById('og-top-gaps').value || 10,
+        labels: issue.labels || []
       })
-    });
-    const data = await res.json();
-    if (data.error) { showError('og', data.error); return; }
-    lastResult = data;
-    lastSearchType = 'org';
-    lastSearchLabel = org;
-    renderOrgAnalysis('og-results', data);
-  } catch(e) { showError('og', e.message); }
-  finally { setLoading('og', false); }
-}
+    }).then(function(r){ return r.json(); });
+  }
+  function apiCountRepos(lang, topic) {
+    var p = new URLSearchParams();
+    if (lang) p.set('language', lang);
+    if (topic) p.set('topic', topic);
+    return fetch('/api/count-repos?' + p.toString()).then(function(r){ return r.json(); });
+  }
+  function apiTrendingRepos(lang, topic, tf) {
+    return fetch('/api/trending-repos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: lang, topic: topic || undefined, timeframe: tf })
+    }).then(function(r){ return r.json(); });
+  }
+  function apiOrgTopics(org, topic) {
+    return fetch('/api/org-topics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org: org, topic: topic || undefined })
+    }).then(function(r){ return r.json(); });
+  }
+  function apiAnalyseRepo(fullName) {
+    var s = state.settings;
+    var providerForApi = s.provider === 'anthropic' ? 'claude' : s.provider;
+    return fetch('/api/analyse-repo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: s.apiKey,
+        provider: providerForApi,
+        model: s.model || providerInfo(s.provider).defaultModel,
+        repo: fullName
+      })
+    }).then(function(r){ return r.json(); });
+  }
+  function apiAnalyseTopic(org, topic) {
+    var s = state.settings;
+    var providerForApi = s.provider === 'anthropic' ? 'claude' : s.provider;
+    return fetch('/api/analyse-topic', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: s.apiKey,
+        provider: providerForApi,
+        model: s.model || providerInfo(s.provider).defaultModel,
+        org: org,
+        topic: topic
+      })
+    }).then(function(r){ return r.json(); });
+  }
 
-function renderOrgAnalysis(containerId, data) {
-  const el = document.getElementById(containerId);
-  let html = renderSummaryPanel(data, lastSearchType, lastSearchLabel);
-  html += resultsHeader(esc(data.org) + ' Organization', data.reposFound + ' repos');
-  html += '<div class="repo-info">';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (data.reposFound||0) + '</div><div class="repo-stat-label">Repos</div></div>';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (data.issuesAnalyzed||0).toLocaleString() + '</div><div class="repo-stat-label">Issues</div></div>';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (data.gaps||[]).length + '</div><div class="repo-stat-label">Gaps</div></div>';
-  html += '<div class="repo-stat"><div class="repo-stat-value">' + (data.abandonedRepos||[]).length + '</div><div class="repo-stat-label">Abandoned</div></div>';
-  html += '</div>';
-  if (data.gaps && data.gaps.length) {
-    html += '<div class="section"><h4>Gap Clusters</h4>';
-    for (const gap of data.gaps) {
-      html += '<div class="gap-card">';
-      html += '<div class="gap-card-header"><span class="gap-theme">' + esc(gap.theme) + '</span><span class="gap-score">Score: ' + Math.round(gap.gapScore) + '</span></div>';
-      html += '<div class="gap-meta"><span class="meta-item"><strong>' + gap.issueCount + '</strong> issues</span><span class="meta-item"><strong>' + gap.totalReactions + '</strong> reactions</span><span class="meta-item"><strong>' + gap.affectedRepos.length + '</strong> repos</span><span class="meta-item">avg age <strong>' + gap.avgAgeDays + 'd</strong></span></div>';
-      if (gap.keywords && gap.keywords.length) html += '<div class="keywords">' + gap.keywords.map(function(k) { return '<span class="kw-tag">' + esc(k) + '</span>'; }).join('') + '</div>';
-      html += '<div class="issues-list">' + (gap.sampleIssues||[]).map(function(i) { return '<a class="issue-link" href="' + safeUrl(i.url) + '" target="_blank"><span class="reactions-badge">👍 ' + i.reactions + '</span>' + esc(i.title.slice(0,80)) + '</a>'; }).join('') + '</div>';
-      html += '</div>';
+  function providerInfo(id) {
+    for (var i = 0; i < PROVIDERS.length; i++) if (PROVIDERS[i].id === id) return PROVIDERS[i];
+    return PROVIDERS[2];
+  }
+
+  function pickSection(text, label) {
+    var re = new RegExp('\\*\\*' + label + ':?\\*\\*\\s*([\\s\\S]+?)(?=\\n\\s*\\*\\*|$)', 'i');
+    var m = String(text || '').match(re);
+    return m ? m[1].trim() : '';
+  }
+  function parseAnalysis(text) {
+    return {
+      product: pickSection(text, 'Product'),
+      languages: pickSection(text, 'Languages') || pickSection(text, 'Languages used'),
+      summary: pickSection(text, 'Issue Summary') || pickSection(text, 'Summary')
+    };
+  }
+  function parseRepoAnalysis(text) {
+    return [
+      { key: 'Product',       val: pickSection(text, 'Product') },
+      { key: 'Languages used',val: pickSection(text, 'Languages used') || pickSection(text, 'Languages') },
+      { key: 'Age',           val: pickSection(text, 'Age') },
+      { key: 'Stars',         val: pickSection(text, 'Stars') },
+      { key: 'Open issues',   val: pickSection(text, 'Open issues') },
+      { key: 'Summary',       val: pickSection(text, 'Summary') }
+    ];
+  }
+  function parseTopicAnalysis(text) {
+    return [
+      { key: 'Topic',             val: pickSection(text, 'Topic') },
+      { key: 'What it covers',    val: pickSection(text, 'What it covers') },
+      { key: 'Repos in this org', val: pickSection(text, 'Repos in this org') },
+      { key: 'Primary languages', val: pickSection(text, 'Primary languages') || pickSection(text, 'Languages') },
+      { key: 'Total open issues', val: pickSection(text, 'Total open issues') || pickSection(text, 'Open issues') },
+      { key: 'Summary',           val: pickSection(text, 'Summary') }
+    ];
+  }
+
+  // ---------- Renderers ----------
+  function setError(msg) {
+    state.error = msg || '';
+    var slot = $('error-slot');
+    slot.innerHTML = state.error
+      ? '<div class="error-banner">' + esc(state.error) + '</div>'
+      : '';
+  }
+
+  function updateProviderPill() {
+    var pill = $('provider-pill');
+    if (pill) pill.textContent = providerInfo(state.settings.provider).short;
+  }
+
+  function updateSearchButton() {
+    // The Issues+Repos tabs share btn ids; Org has its own.
+    if (state.activeTab === 'org') {
+      var btnO = $('search-btn-org');
+      var lblO = $('search-btn-org-label');
+      var orgVal = $('org-input').value.trim();
+      btnO.disabled = state.org.searching || !orgVal;
+      if (state.org.searching) {
+        lblO.innerHTML = '<span class="spinner"></span> Searching';
+        var kbdO = btnO.querySelector('kbd'); if (kbdO) kbdO.style.display = 'none';
+      } else {
+        lblO.textContent = 'Search';
+        var kbdO2 = btnO.querySelector('kbd'); if (kbdO2) kbdO2.style.display = '';
+      }
+      return;
+    }
+    var btn = $('search-btn');
+    var label = $('search-btn-label');
+    var langVal = $('lang-input').value.trim();
+    var topicVal = $('topic-input').value.trim();
+    var c = cur();
+    var disabled = c.searching || (!langVal && !topicVal);
+    btn.disabled = disabled;
+    if (c.searching) {
+      label.innerHTML = '<span class="spinner"></span> Searching';
+      var kbd = btn.querySelector('kbd'); if (kbd) kbd.style.display = 'none';
+    } else {
+      label.textContent = 'Search';
+      var kbd2 = btn.querySelector('kbd'); if (kbd2) kbd2.style.display = '';
+    }
+  }
+
+  function renderEmpty() {
+    var cells = '';
+    for (var i = 0; i < 36; i++) {
+      cells += '<div class="ea-cell" style="animation-delay:' + (i*60) + 'ms"></div>';
+    }
+    var tab = state.activeTab;
+    var copy = TAB_LABELS[tab] || TAB_LABELS.issues;
+    var titleHtml = esc(copy.empty).replace(/\n/g, '<br/>');
+    return ''
+      + '<div class="empty">'
+      +   '<div class="empty-art">'
+      +     '<div class="ea-grid">' + cells + '</div>'
+      +     '<div class="ea-target"></div>'
+      +   '</div>'
+      +   '<div class="empty-title">' + titleHtml + '</div>'
+      +   '<div class="empty-sub">' + esc(copy.sub) + '</div>'
+      + '</div>';
+  }
+
+  function renderResults() {
+    if (state.activeTab === 'issues') return renderIssuesResults();
+    if (state.activeTab === 'repos')  return renderReposResults();
+    if (state.activeTab === 'org')    return renderOrgResults();
+  }
+
+  function renderTrendingBar(tab) {
+    var c = state[tab];
+    var tf = c.timeframe;
+    var tfs = ['daily', 'weekly', 'monthly'];
+    var labels = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
+    var subs = { daily: 'last 24h', weekly: 'last 7d', monthly: 'last 30d' };
+    var html = '<div class="timeframe-bar" role="tablist">';
+    for (var i = 0; i < tfs.length; i++) {
+      var k = tfs[i];
+      html += '<button class="tf ' + (k === tf ? 'active' : '') + '" data-tf="' + k + '" role="tab" aria-selected="' + (k === tf) + '">'
+        +   '<span class="tf-label">' + labels[k] + '</span>'
+        +   '<span class="tf-sub">' + subs[k] + '</span>'
+        +   '<span class="tf-n">top ' + tfCount(k) + '</span>'
+        + '</button>';
+    }
+    return html + '</div>';
+  }
+
+  function renderStatsStrip(num, labelHtml) {
+    var dateStr = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    var timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return ''
+      + '<div class="stats-strip">'
+      +   '<div class="stat-main">'
+      +     '<div class="stat-num" id="stat-num">' + (num != null ? num.toLocaleString() : '0') + '</div>'
+      +     '<div class="stat-label">' + labelHtml + '</div>'
+      +   '</div>'
+      +   '<div class="stat-side">'
+      +     '<div class="stat-pip"><span class="dot live"></span> live · github api</div>'
+      +     '<div class="stat-meta">indexed ' + esc(dateStr) + ', ' + esc(timeStr) + '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function renderIssuesResults() {
+    var slot = $('results-slot');
+    var c = state.issues;
+    if (!c.searched && !c.searching) { slot.innerHTML = renderEmpty(); return; }
+    if (!c.searched) { slot.innerHTML = ''; return; }
+
+    var s = c.searched;
+    var tf = c.timeframe;
+    var langChip = s.language ? '<span class="mono">' + esc(s.language) + '</span>' : '';
+    var topicChip = s.topic ? ' · <span class="mono">' + esc(s.topic) + '</span>' : '';
+    var lblHtml = 'open issues on GitHub matching ' + (langChip || topicChip ? (langChip + topicChip) : '<span class="mono">your search</span>');
+
+    var html = renderStatsStrip(s.total, lblHtml);
+    html += renderTrendingBar('issues');
+    html += ''
+      + '<div class="results-head">'
+      +   '<div class="results-title">'
+      +     '<span class="rh-em">Top ' + tfCount(tf) + '</span>'
+      +     '<span class="muted"> issues updated in the last </span>'
+      +     '<span class="rh-em">' + tfWindow(tf) + '</span>'
+      +     '<span class="muted">, sorted by reactions</span>'
+      +   '</div>'
+      +   '<div class="results-actions">'
+      +     '<button class="link-btn" disabled>Sort: reactions ▾</button>'
+      +     '<button class="link-btn" id="export-btn">Export</button>'
+      +   '</div>'
+      + '</div>';
+
+    html += '<div class="issues">';
+    var data = c.dataByTf[tf] || [];
+    if (c.loadingTf || (c.searching && !data.length)) {
+      for (var j = 0; j < 6; j++) html += '<div class="issue skel"></div>';
+    } else if (!data.length) {
+      html += '<div class="empty" style="padding:30px 0"><div class="empty-sub">No issues found for this filter.</div></div>';
+    } else {
+      for (var ix = 0; ix < data.length; ix++) html += renderIssueCard(data[ix], ix);
     }
     html += '</div>';
-  }
-  if (data.repos && data.repos.length) {
-    html += '<div class="section"><h4>Repositories (' + data.repos.length + ')</h4>';
-    html += '<table><thead><tr><th>Repo</th><th>Stars</th><th>Open Issues</th><th>Last Pushed</th><th>Status</th></tr></thead><tbody>';
-    for (const r of data.repos) {
-      const d = r.lastPushed ? new Date(r.lastPushed).toLocaleDateString() : 'N/A';
-      html += '<tr>';
-      html += '<td><a href="https://github.com/' + esc(r.fullName) + '" target="_blank">' + esc(r.fullName) + '</a></td>';
-      html += '<td>' + (r.stars||0).toLocaleString() + '</td>';
-      html += '<td>' + (r.openIssues||0) + '</td>';
-      html += '<td>' + d + '</td>';
-      html += '<td>' + (r.isAbandoned ? '<span class="stale-badge">abandoned</span>' : '<span style="color:#4ade80;font-size:11px">active</span>') + '</td>';
-      html += '</tr>';
-    }
-    html += '</tbody></table></div>';
-  }
-  el.innerHTML = html;
-}
 
-// load picked issues on startup
-window.addEventListener('DOMContentLoaded', function() { renderPickedIssues(); });
+    slot.innerHTML = html;
+  }
+
+  function renderReposResults() {
+    var slot = $('results-slot');
+    var c = state.repos;
+    if (!c.searched && !c.searching) { slot.innerHTML = renderEmpty(); return; }
+    if (!c.searched) { slot.innerHTML = ''; return; }
+
+    var s = c.searched;
+    var tf = c.timeframe;
+    var langChip = s.language ? '<span class="mono">' + esc(s.language) + '</span>' : '';
+    var topicChip = s.topic ? ' · <span class="mono">' + esc(s.topic) + '</span>' : '';
+    var lblHtml = 'public repositories on GitHub matching ' + (langChip || topicChip ? (langChip + topicChip) : '<span class="mono">your search</span>');
+
+    var html = renderStatsStrip(s.total, lblHtml);
+    html += renderTrendingBar('repos');
+    html += ''
+      + '<div class="results-head">'
+      +   '<div class="results-title">'
+      +     '<span class="rh-em">Top ' + tfCount(tf) + '</span>'
+      +     '<span class="muted"> repositories pushed in the last </span>'
+      +     '<span class="rh-em">' + tfWindow(tf) + '</span>'
+      +     '<span class="muted">, sorted by stars</span>'
+      +   '</div>'
+      +   '<div class="results-actions">'
+      +     '<button class="link-btn" disabled>Sort: stars ▾</button>'
+      +     '<button class="link-btn" id="export-btn">Export</button>'
+      +   '</div>'
+      + '</div>';
+
+    html += '<div class="issues">';
+    var data = c.dataByTf[tf] || [];
+    if (c.loadingTf || (c.searching && !data.length)) {
+      for (var j = 0; j < 6; j++) html += '<div class="issue skel"></div>';
+    } else if (!data.length) {
+      html += '<div class="empty" style="padding:30px 0"><div class="empty-sub">No repositories found for this filter.</div></div>';
+    } else {
+      for (var ix = 0; ix < data.length; ix++) html += renderRepoCard(data[ix], ix);
+    }
+    html += '</div>';
+
+    slot.innerHTML = html;
+  }
+
+  function renderOrgResults() {
+    var slot = $('results-slot');
+    var c = state.org;
+    if (!c.info && !c.searching) { slot.innerHTML = renderEmpty(); return; }
+    if (!c.info) { slot.innerHTML = ''; return; }
+
+    var info = c.info;
+    var blogLink = info.blog ? '<a href="' + esc(info.blog.indexOf('http') === 0 ? info.blog : 'https://' + info.blog) + '" target="_blank" rel="noopener">' + esc(info.blog) + '</a>' : '';
+    var html = ''
+      + '<div class="org-banner">'
+      +   (info.avatarUrl ? '<img class="org-avatar" src="' + esc(info.avatarUrl) + '" alt=""/>' : '')
+      +   '<div class="org-meta">'
+      +     '<div class="org-name">' + esc(info.name || info.login) + '</div>'
+      +     (info.description ? '<div class="org-desc">' + esc(info.description) + '</div>' : '')
+      +     '<div class="org-stats">'
+      +       '<span><strong style="color:var(--text)">' + (info.publicRepos || 0).toLocaleString() + '</strong> public repos</span>'
+      +       (blogLink ? '<span>' + blogLink + '</span>' : '')
+      +       '<a href="' + esc(info.htmlUrl) + '" target="_blank" rel="noopener">open on github →</a>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+
+    html += ''
+      + '<div class="results-head">'
+      +   '<div class="results-title">'
+      +     '<span class="rh-em">Top topics</span>'
+      +     '<span class="muted"> across ' + esc(info.login) + '’s public repositories</span>'
+      +     (c.query && c.query.topic ? '<span class="muted">, filtered to </span><span class="mono">' + esc(c.query.topic) + '</span>' : '')
+      +   '</div>'
+      +   '<div class="results-actions">'
+      +     '<button class="link-btn" id="export-btn">Export</button>'
+      +   '</div>'
+      + '</div>';
+
+    html += '<div class="issues">';
+    if (c.searching) {
+      for (var j = 0; j < 6; j++) html += '<div class="issue skel"></div>';
+    } else if (!c.topics.length) {
+      html += '<div class="empty" style="padding:30px 0"><div class="empty-sub">No topics found in this organization' + (c.query && c.query.topic ? ' for ‘' + esc(c.query.topic) + '’' : '') + '.</div></div>';
+    } else {
+      for (var ix = 0; ix < c.topics.length; ix++) html += renderTopicCard(c.topics[ix], ix, info.login);
+    }
+    html += '</div>';
+
+    slot.innerHTML = html;
+  }
+
+  function renderRepoCard(r, idx) {
+    var key = 'repo:' + r.fullName;
+    var analysing = !!state.analysing[key];
+    var analysis = state.analyses[key];
+    var langName = normalizeLang(r.language || '');
+    var langColor = LANG_COLOR[langName] || (langName ? '#888' : 'transparent');
+    var langSwatch = langName ? '<span class="lang-swatch" style="background:' + esc(langColor) + '" title="' + esc(langName) + '"></span>' : '';
+    var ageStr = '';
+    if (r.ageDays != null) {
+      ageStr = r.ageDays >= 365 ? ('created ' + (r.ageDays / 365).toFixed(1) + 'y ago') : ('created ' + r.ageDays + 'd ago');
+    }
+    var topics = (r.topics || []).slice(0, 6).map(function(t){
+      return '<span class="rc-topic-chip">' + esc(t) + '</span>';
+    }).join('');
+    var analyseLabel;
+    if (analysing) analyseLabel = '<span class="spinner-sm"></span> Analysing';
+    else if (analysis) analyseLabel = 'View analysis <span class="sparkle">✦</span>';
+    else analyseLabel = '<span class="sparkle">✦</span> Analyse';
+    var analyseClasses = 'btn btn-ghost analyse-btn' + (analysing ? ' loading' : '') + (analysis ? ' done' : '');
+    return ''
+      + '<div class="repo-card" data-key="' + esc(key) + '">'
+      +   '<div class="rc-rank">' + String(idx + 1).padStart(2, '0') + '</div>'
+      +   '<div class="rc-body">'
+      +     '<div class="rc-meta">'
+      +       langSwatch
+      +       '<a class="rc-name" href="' + esc(r.htmlUrl) + '" target="_blank" rel="noopener">' + esc(r.fullName) + '</a>'
+      +       '<span class="rc-stars"><span class="ic">★</span> ' + (r.stars || 0).toLocaleString() + '</span>'
+      +       (ageStr ? '<span class="dot-sep">·</span><span class="muted">' + esc(ageStr) + '</span>' : '')
+      +     '</div>'
+      +     (r.description ? '<div class="rc-desc">' + esc(r.description) + '</div>' : '')
+      +     (topics ? '<div class="rc-topics">' + topics + '</div>' : '')
+      +     '<div class="rc-footer">'
+      +       '<span class="rc-issues">' + (r.openIssues || 0).toLocaleString() + ' open issues</span>'
+      +       '<div class="spacer"></div>'
+      +       '<button class="' + analyseClasses + '" data-analyse-repo="' + esc(r.fullName) + '"' + (analysing ? ' disabled' : '') + '>' + analyseLabel + '</button>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function renderTopicCard(t, idx, orgLogin) {
+    var key = 'topic:' + orgLogin + '::' + t.name;
+    var analysing = !!state.analysing[key];
+    var analysis = state.analyses[key];
+    var sampleRepos = (t.sampleRepos || []).slice(0, 4).map(function(r){
+      return '<a class="tc-repo-link" href="' + esc(r.htmlUrl) + '" target="_blank" rel="noopener">' + esc(r.fullName) + '</a>';
+    }).join('');
+    var langs = (t.languages || []).slice(0, 6).map(function(l){
+      var n = normalizeLang(l); var color = LANG_COLOR[n] || '#888';
+      return '<span class="rc-topic-chip" style="border-color:' + esc(color) + ';color:' + esc(color) + '">' + esc(l) + '</span>';
+    }).join('');
+    var analyseLabel;
+    if (analysing) analyseLabel = '<span class="spinner-sm"></span> Analysing';
+    else if (analysis) analyseLabel = 'View analysis <span class="sparkle">✦</span>';
+    else analyseLabel = '<span class="sparkle">✦</span> Analyse';
+    var analyseClasses = 'btn btn-ghost analyse-btn' + (analysing ? ' loading' : '') + (analysis ? ' done' : '');
+    return ''
+      + '<div class="topic-card" data-key="' + esc(key) + '">'
+      +   '<div class="tc-rank">' + String(idx + 1).padStart(2, '0') + '</div>'
+      +   '<div class="tc-body">'
+      +     '<div class="tc-name">#' + esc(t.name) + '</div>'
+      +     '<div class="tc-stats">'
+      +       '<span class="tc-stat"><strong>' + (t.repoCount || 0).toLocaleString() + '</strong> repos</span>'
+      +       '<span class="dot-sep">·</span>'
+      +       '<span class="tc-stat"><span class="ic">★</span> <strong>' + (t.totalStars || 0).toLocaleString() + '</strong> total</span>'
+      +       '<span class="dot-sep">·</span>'
+      +       '<span class="tc-stat"><strong>' + (t.totalOpenIssues || 0).toLocaleString() + '</strong> open issues</span>'
+      +     '</div>'
+      +     (sampleRepos ? '<div class="tc-repos">' + sampleRepos + '</div>' : '')
+      +     '<div class="tc-footer">'
+      +       (langs ? '<div class="tc-langs">' + langs + '</div>' : '')
+      +       '<div class="spacer"></div>'
+      +       '<button class="' + analyseClasses + '" data-analyse-topic="' + esc(orgLogin) + '::' + esc(t.name) + '"' + (analysing ? ' disabled' : '') + '>' + analyseLabel + '</button>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function renderIssueCard(iss, idx) {
+    var k = 'issue:' + issueKey(iss);
+    var analysing = !!state.analysing[k];
+    var analysis = state.analyses[k];
+    var langName = normalizeLang(iss.lang || (state.issues.searched && state.issues.searched.language) || '');
+    var langColor = LANG_COLOR[langName] || (langName ? '#888' : 'transparent');
+    var langSwatch = langName ? '<span class="lang-swatch" style="background:' + esc(langColor) + '" title="' + esc(langName) + '"></span>' : '';
+    var hours = '';
+    if (iss.createdAt && (iss.ageDays === 0 || iss.ageDays == null)) {
+      var totalH = Math.floor((Date.now() - new Date(iss.createdAt).getTime()) / 3600000);
+      hours = isNaN(totalH) ? '' : (totalH + 'h ago');
+    }
+    var ageStr = iss.ageDays != null ? formatAge(iss.ageDays, 0) : hours;
+    if (iss.ageDays === 0 && hours) ageStr = hours;
+
+    var labels = (iss.labels || []).slice(0, 5).map(function(l){
+      return '<span class="' + esc(safeLabelClass(l)) + '">' + esc(l) + '</span>';
+    }).join('');
+
+    var url = iss.url || '#';
+    var title = esc(iss.title || '(untitled)');
+
+    var staleBadge = iss.isStale ? '<span class="badge badge-stale">stale</span>' : '';
+    var commentsPill = iss.comments != null
+      ? '<div class="comments-pill"><span class="ic">💬</span> ' + iss.comments + '</div>'
+      : '';
+
+    var analyseLabel;
+    if (analysing) {
+      analyseLabel = '<span class="spinner-sm"></span> Analysing';
+    } else if (analysis) {
+      analyseLabel = 'View analysis <span class="sparkle">✦</span>';
+    } else {
+      analyseLabel = '<span class="sparkle">✦</span> Analyse';
+    }
+    var analyseClasses = 'btn btn-ghost analyse-btn' + (analysing ? ' loading' : '') + (analysis ? ' done' : '');
+
+    return ''
+      + '<div class="issue" data-key="' + esc(k) + '">'
+      +   '<div class="issue-rank">' + String(idx + 1).padStart(2, '0') + '</div>'
+      +   '<div class="issue-body">'
+      +     '<div class="issue-meta">'
+      +       langSwatch
+      +       '<span class="repo mono">' + esc(iss.repo || '') + '</span>'
+      +       '<span class="dot-sep">·</span>'
+      +       '<span class="muted mono">#' + esc(String(iss.number || '')) + '</span>'
+      +       (ageStr ? '<span class="dot-sep">·</span><span class="muted">' + esc(ageStr) + '</span>' : '')
+      +       staleBadge
+      +     '</div>'
+      +     '<a class="issue-title" href="' + esc(url) + '" target="_blank" rel="noopener">' + title + '</a>'
+      +     '<div class="issue-footer">'
+      +       (iss.reactions ? '<div class="reactions"><span class="r-up">▲</span> <span class="r-n">+' + iss.reactions + '</span></div>' : '')
+      +       commentsPill
+      +       '<div class="labels">' + labels + '</div>'
+      +       '<div class="spacer"></div>'
+      +       '<button class="' + analyseClasses + '" data-analyse="' + esc(k) + '"' + (analysing ? ' disabled' : '') + '>' + analyseLabel + '</button>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function row(key, val) {
+    return '<div class="a-row"><div class="a-key">' + esc(key) + '</div><div class="a-val">' + esc(val || '—') + '</div></div>';
+  }
+
+  // ---------- Count-up animation ----------
+  function animateCount(target, duration) {
+    duration = duration || 900;
+    var node = $('stat-num');
+    if (!node) return;
+    var start = performance.now();
+    function tick(now) {
+      var t = Math.min(1, (now - start) / duration);
+      var eased = 1 - Math.pow(1 - t, 3);
+      var v = Math.round(target * eased);
+      node.textContent = v.toLocaleString();
+      if (t < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ---------- Modal (settings) ----------
+  function renderModal() {
+    var slot = $('modal-slot');
+    if (!state.settingsOpen) { slot.innerHTML = ''; return; }
+    var s = state.modalDraft || { provider: state.settings.provider, apiKey: state.settings.apiKey, model: state.settings.model, showKey: false };
+    state.modalDraft = s;
+
+    var providerCards = PROVIDERS.map(function(pr){
+      var sel = s.provider === pr.id;
+      return ''
+        + '<button type="button" class="provider-card ' + (sel ? 'selected' : '') + '" data-pick-provider="' + pr.id + '">'
+        +   '<div class="pc-glyph">' + pr.glyph + '</div>'
+        +   '<div class="pc-text">'
+        +     '<div class="pc-name">' + esc(pr.label) + '</div>'
+        +     '<div class="pc-model mono">' + esc(pr.defaultModel) + '</div>'
+        +   '</div>'
+        +   '<div class="pc-radio">' + (sel ? '<div class="pc-dot"></div>' : '') + '</div>'
+        + '</button>';
+    }).join('');
+
+    var valid = (s.apiKey || '').trim().length > 6 && (s.model || '').trim().length > 0;
+    var statusHtml = valid
+      ? '<span class="dot ok"></span> Ready'
+      : '<span class="dot warn"></span> Add an API key';
+
+    var placeholder = providerInfo(s.provider).placeholder;
+
+    slot.innerHTML = ''
+      + '<div class="modal-scrim" id="modal-scrim">'
+      +   '<div class="modal" role="dialog" aria-label="AI Settings" id="modal-panel">'
+      +     '<div class="modal-head">'
+      +       '<div>'
+      +         '<div class="modal-title">AI Settings</div>'
+      +         '<div class="modal-sub">Bring your own key — calls are proxied locally, key stays in your browser.</div>'
+      +       '</div>'
+      +       '<button class="icon-btn" id="modal-close" aria-label="Close">✕</button>'
+      +     '</div>'
+      +     '<div class="modal-body">'
+      +       '<div class="form-row">'
+      +         '<label>Provider</label>'
+      +         '<div class="provider-grid">' + providerCards + '</div>'
+      +       '</div>'
+      +       '<div class="form-row">'
+      +         '<label>API Key</label>'
+      +         '<div class="input-wrap key-wrap">'
+      +           '<span class="input-icon">⚿</span>'
+      +           '<input id="modal-key" type="' + (s.showKey ? 'text' : 'password') + '" value="' + esc(s.apiKey) + '" placeholder="' + esc(placeholder) + '" spellcheck="false" autocomplete="off"/>'
+      +           '<button type="button" class="ghost-mini" id="toggle-key">' + (s.showKey ? 'hide' : 'show') + '</button>'
+      +         '</div>'
+      +         '<div class="form-help">Stored in <span class="mono">localStorage</span>. Never sent anywhere except the provider above.</div>'
+      +       '</div>'
+      +       '<div class="form-row">'
+      +         '<label>Model <span class="opt">editable</span></label>'
+      +         '<div class="input-wrap">'
+      +           '<span class="input-icon mono">m</span>'
+      +           '<input id="modal-model" value="' + esc(s.model) + '" spellcheck="false" autocomplete="off"/>'
+      +         '</div>'
+      +       '</div>'
+      +     '</div>'
+      +     '<div class="modal-foot">'
+      +       '<div class="foot-status">' + statusHtml + '</div>'
+      +       '<div class="foot-actions">'
+      +         '<button class="btn btn-ghost" id="modal-cancel">Cancel</button>'
+      +         '<button class="btn btn-primary" id="modal-save"' + (valid ? '' : ' disabled') + '>Save</button>'
+      +       '</div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function renderAnalysisModal() {
+    var slot = $('analysis-modal-slot');
+    if (!state.analysisOpenFor) { slot.innerHTML = ''; return; }
+    var key = state.analysisOpenFor;
+    var analysis = state.analyses[key];
+    if (!analysis) { slot.innerHTML = ''; return; }
+
+    var rowsHtml = (analysis.rows || []).map(function(r){
+      return row(r.key, r.val);
+    }).join('');
+
+    var sub1 = analysis.subtitleLines && analysis.subtitleLines[0] ? '<span class="mono small muted">' + esc(analysis.subtitleLines[0]) + '</span><br/>' : '';
+    var sub2 = analysis.subtitleLines && analysis.subtitleLines[1] ? esc(analysis.subtitleLines[1]) : '';
+
+    slot.innerHTML = ''
+      + '<div class="modal-scrim" id="analysis-scrim">'
+      +   '<div class="modal modal-wide" role="dialog" aria-label="' + esc(analysis.title || 'Analysis') + '">'
+      +     '<div class="modal-head">'
+      +       '<div>'
+      +         '<div class="modal-title">' + esc(analysis.title || 'Analysis') + '</div>'
+      +         (sub1 || sub2 ? '<div class="modal-title-issue">' + sub1 + sub2 + '</div>' : '')
+      +       '</div>'
+      +       '<button class="icon-btn" id="analysis-close" aria-label="Close">✕</button>'
+      +     '</div>'
+      +     '<div class="modal-body">'
+      +       '<div class="analysis-grid">' + rowsHtml + '</div>'
+      +     '</div>'
+      +     '<div class="modal-foot">'
+      +       '<span class="mono small muted">via ' + esc(analysis.providerLabel || '') + ' · ' + esc(analysis.model || '') + '</span>'
+      +       (analysis.externalUrl ? '<a class="modal-foot-link" href="' + esc(analysis.externalUrl) + '" target="_blank" rel="noopener">' + esc(analysis.externalLabel || 'Open on GitHub →') + '</a>' : '')
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function openModal() {
+    state.modalDraft = {
+      provider: state.settings.provider,
+      apiKey: state.settings.apiKey,
+      model: state.settings.model,
+      showKey: false
+    };
+    state.settingsOpen = true;
+    renderModal();
+  }
+  function closeModal() {
+    state.settingsOpen = false;
+    state.modalDraft = null;
+    renderModal();
+  }
+
+  // ---------- Event handlers ----------
+  function bindHeader() {
+    $('open-settings').addEventListener('click', openModal);
+  }
+  function bindTabs() {
+    document.querySelectorAll('.tab-pill').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        setActiveTab(btn.getAttribute('data-tab'));
+      });
+    });
+  }
+  function setActiveTab(name) {
+    if (name !== 'issues' && name !== 'repos' && name !== 'org') return;
+    state.activeTab = name;
+    document.querySelectorAll('.tab-pill').forEach(function(b){
+      b.classList.toggle('active', b.getAttribute('data-tab') === name);
+    });
+    var lt = $('search-form-lt'); var og = $('search-form-org');
+    lt.style.display = (name === 'org') ? 'none' : '';
+    og.style.display = (name === 'org') ? '' : 'none';
+    setError('');
+    updateSearchButton();
+    renderResults();
+    // focus the right input
+    if (name === 'org') { $('org-input').focus(); }
+    else { $('lang-input').focus(); }
+  }
+
+  function bindSearch() {
+    var formLt = $('search-form-lt');
+    formLt.addEventListener('submit', function(e){ e.preventDefault(); runSearch(); });
+    $('lang-input').addEventListener('input', updateSearchButton);
+    $('topic-input').addEventListener('input', updateSearchButton);
+    var formOrg = $('search-form-org');
+    formOrg.addEventListener('submit', function(e){ e.preventDefault(); runSearchOrg(); });
+    $('org-input').addEventListener('input', updateSearchButton);
+    $('org-topic-input').addEventListener('input', updateSearchButton);
+    document.querySelectorAll('.chip-suggest').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        if (btn.classList.contains('org-chip')) {
+          $('org-input').value = btn.getAttribute('data-o') || '';
+          $('org-topic-input').value = btn.getAttribute('data-t') || '';
+          updateSearchButton();
+          runSearchOrg();
+        } else {
+          $('lang-input').value = btn.getAttribute('data-l') || '';
+          $('topic-input').value = btn.getAttribute('data-t') || '';
+          updateSearchButton();
+          runSearch();
+        }
+      });
+    });
+  }
+  function bindResultsClicks() {
+    var slot = $('results-slot');
+    slot.addEventListener('click', function(e){
+      var tfBtn = e.target.closest && e.target.closest('[data-tf]');
+      if (tfBtn) { selectTimeframe(tfBtn.getAttribute('data-tf')); return; }
+      var aIssue = e.target.closest && e.target.closest('[data-analyse]');
+      if (aIssue) { onAnalyseIssue(aIssue.getAttribute('data-analyse')); return; }
+      var aRepo  = e.target.closest && e.target.closest('[data-analyse-repo]');
+      if (aRepo)  { onAnalyseRepo(aRepo.getAttribute('data-analyse-repo')); return; }
+      var aTopic = e.target.closest && e.target.closest('[data-analyse-topic]');
+      if (aTopic) { onAnalyseTopic(aTopic.getAttribute('data-analyse-topic')); return; }
+      if (e.target.id === 'export-btn') { exportJSON(); return; }
+    });
+  }
+  function bindModalClicks() {
+    document.body.addEventListener('click', function(e){
+      // Analysis popup
+      if (state.analysisOpenFor) {
+        if (e.target.id === 'analysis-scrim') { closeAnalysisModal(); return; }
+        if (e.target.id === 'analysis-close' || (e.target.closest && e.target.closest('#analysis-close'))) { closeAnalysisModal(); return; }
+      }
+      if (!state.settingsOpen) return;
+      if (e.target.id === 'modal-scrim') { closeModal(); return; }
+      if (e.target.id === 'modal-close' || e.target.closest('#modal-close')) { closeModal(); return; }
+      if (e.target.id === 'modal-cancel') { closeModal(); return; }
+      if (e.target.id === 'modal-save')   { onSaveSettings(); return; }
+      if (e.target.id === 'toggle-key')   { state.modalDraft.showKey = !state.modalDraft.showKey; renderModal(); return; }
+      var pickProv = e.target.closest && e.target.closest('[data-pick-provider]');
+      if (pickProv) {
+        var newP = pickProv.getAttribute('data-pick-provider');
+        var prevModel = state.modalDraft.model;
+        state.modalDraft.provider = newP;
+        // auto-fill model if previous was a default of some provider
+        var prevWasDefault = PROVIDERS.some(function(p){ return p.defaultModel === prevModel; });
+        if (!prevModel || prevWasDefault) {
+          state.modalDraft.model = providerInfo(newP).defaultModel;
+        }
+        renderModal();
+        return;
+      }
+    });
+    document.body.addEventListener('input', function(e){
+      if (!state.settingsOpen) return;
+      if (e.target.id === 'modal-key')   { state.modalDraft.apiKey = e.target.value; refreshFootStatus(); }
+      if (e.target.id === 'modal-model') { state.modalDraft.model  = e.target.value; refreshFootStatus(); }
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape') {
+        if (state.analysisOpenFor) { closeAnalysisModal(); return; }
+        if (state.settingsOpen) closeModal();
+      }
+    });
+  }
+
+  function refreshFootStatus() {
+    var s = state.modalDraft;
+    var valid = (s.apiKey || '').trim().length > 6 && (s.model || '').trim().length > 0;
+    var foot = document.querySelector('.foot-status');
+    if (foot) foot.innerHTML = valid ? '<span class="dot ok"></span> Ready' : '<span class="dot warn"></span> Add an API key';
+    var saveBtn = $('modal-save');
+    if (saveBtn) saveBtn.disabled = !valid;
+  }
+
+  function onSaveSettings() {
+    var s = state.modalDraft;
+    saveSettings({ provider: s.provider, apiKey: (s.apiKey || '').trim(), model: (s.model || '').trim() });
+    closeModal();
+    renderResults();
+  }
+
+  async function runSearch() {
+    var tab = state.activeTab === 'org' ? 'issues' : state.activeTab;
+    var lang = $('lang-input').value.trim();
+    var topic = $('topic-input').value.trim();
+    if (!lang && !topic) return;
+    setError('');
+    var c = state[tab];
+    c.searching = true;
+    c.searched = null;
+    c.dataByTf = {};
+    c.timeframe = 'weekly';
+    updateSearchButton();
+    renderResults();
+    try {
+      var countResp = tab === 'repos' ? await apiCountRepos(lang, topic) : await apiCount(lang, topic);
+      if (countResp.error) { setError(countResp.error); c.searching = false; updateSearchButton(); renderResults(); return; }
+      c.searched = { language: lang, topic: topic, total: countResp.totalCount || 0 };
+
+      var t = tab === 'repos'
+        ? await apiTrendingRepos(lang, topic, 'weekly')
+        : await apiTrending(lang, topic, 'weekly');
+      if (t.error) setError(t.error);
+      c.dataByTf.weekly = tab === 'repos' ? (t.repos || []) : (t.issues || []);
+      c.searching = false;
+      updateSearchButton();
+      renderResults();
+      animateCount(c.searched.total);
+    } catch (e) {
+      setError(e && e.message ? e.message : 'Search failed.');
+      c.searching = false;
+      updateSearchButton();
+      renderResults();
+    }
+  }
+
+  async function runSearchOrg() {
+    var org = $('org-input').value.trim();
+    var topic = $('org-topic-input').value.trim();
+    if (!org) return;
+    setError('');
+    state.org.searching = true;
+    state.org.info = null;
+    state.org.topics = [];
+    state.org.query = { org: org, topic: topic };
+    updateSearchButton();
+    renderResults();
+    try {
+      var r = await apiOrgTopics(org, topic);
+      if (r.error) { setError(r.error); state.org.searching = false; updateSearchButton(); renderResults(); return; }
+      state.org.info = r.info;
+      state.org.topics = r.topics || [];
+      state.org.searching = false;
+      updateSearchButton();
+      renderResults();
+      if (state.org.info) animateCount(state.org.info.publicRepos || 0);
+    } catch (e) {
+      setError(e && e.message ? e.message : 'Search failed.');
+      state.org.searching = false;
+      updateSearchButton();
+      renderResults();
+    }
+  }
+
+  async function selectTimeframe(tf) {
+    var tab = state.activeTab === 'org' ? null : state.activeTab;
+    if (!tab) return;
+    var c = state[tab];
+    if (c.timeframe === tf && c.dataByTf[tf]) return;
+    c.timeframe = tf;
+    if (!c.dataByTf[tf]) {
+      c.loadingTf = true;
+      renderResults();
+      try {
+        var t = tab === 'repos'
+          ? await apiTrendingRepos(c.searched.language, c.searched.topic, tf)
+          : await apiTrending(c.searched.language, c.searched.topic, tf);
+        if (t.error) { setError(t.error); c.dataByTf[tf] = []; }
+        else c.dataByTf[tf] = tab === 'repos' ? (t.repos || []) : (t.issues || []);
+      } catch (e) {
+        setError(e && e.message ? e.message : 'Failed to load.');
+        c.dataByTf[tf] = [];
+      }
+      c.loadingTf = false;
+    }
+    renderResults();
+  }
+
+  async function onAnalyseIssue(issueKeyRaw) {
+    if (!state.settings.apiKey) { openModal(); return; }
+    var key = 'issue:' + issueKeyRaw;
+    if (state.analyses[key]) { openAnalysisModal(key); return; }
+    var c = state.issues;
+    var issue = (c.dataByTf[c.timeframe] || []).find(function(it){ return issueKey(it) === issueKeyRaw; });
+    if (!issue) return;
+    state.analysing[key] = true; renderResults();
+    try {
+      var r = await apiAnalyse(issue);
+      var prov = providerInfo(state.settings.provider);
+      if (r.error) {
+        state.analyses[key] = makeErrAnalysis('Issue Analysis', issue.repo + ' · #' + issue.number, issue.title, issue.url, r.error, prov);
+      } else {
+        var parsed = parseAnalysis(r.summary);
+        state.analyses[key] = {
+          title: 'Issue Analysis',
+          subtitleLines: [issue.repo + ' · #' + issue.number, issue.title || ''],
+          rows: [
+            { key: 'Product',       val: parsed.product || (r.summary || '').slice(0, 220) },
+            { key: 'Languages',     val: parsed.languages || '' },
+            { key: 'Issue summary', val: parsed.summary || (parsed.product ? '' : (r.summary || '')) }
+          ],
+          providerLabel: prov.label.split(' ')[0],
+          model: state.settings.model || prov.defaultModel,
+          externalUrl: issue.url || '',
+          externalLabel: 'Open issue on GitHub →'
+        };
+      }
+    } catch (e) {
+      state.analyses[key] = makeErrAnalysis('Issue Analysis', issue.repo, issue.title, issue.url, e && e.message, providerInfo(state.settings.provider));
+    }
+    state.analysing[key] = false;
+    renderResults();
+    openAnalysisModal(key);
+  }
+
+  async function onAnalyseRepo(fullName) {
+    if (!state.settings.apiKey) { openModal(); return; }
+    var key = 'repo:' + fullName;
+    if (state.analyses[key]) { openAnalysisModal(key); return; }
+    state.analysing[key] = true; renderResults();
+    try {
+      var r = await apiAnalyseRepo(fullName);
+      var prov = providerInfo(state.settings.provider);
+      if (r.error) {
+        state.analyses[key] = makeErrAnalysis('Repository Analysis', fullName, '', 'https://github.com/' + fullName, r.error, prov);
+      } else {
+        var rows = parseRepoAnalysis(r.summary);
+        state.analyses[key] = {
+          title: 'Repository Analysis',
+          subtitleLines: [fullName, (r.info && r.info.stars ? r.info.stars.toLocaleString() + ' stars · ' : '') + ((r.info && r.info.openIssues) || 0) + ' open issues'],
+          rows: rows,
+          providerLabel: prov.label.split(' ')[0],
+          model: state.settings.model || prov.defaultModel,
+          externalUrl: 'https://github.com/' + fullName,
+          externalLabel: 'Open repo on GitHub →'
+        };
+      }
+    } catch (e) {
+      state.analyses[key] = makeErrAnalysis('Repository Analysis', fullName, '', 'https://github.com/' + fullName, e && e.message, providerInfo(state.settings.provider));
+    }
+    state.analysing[key] = false;
+    renderResults();
+    openAnalysisModal(key);
+  }
+
+  async function onAnalyseTopic(composite) {
+    if (!state.settings.apiKey) { openModal(); return; }
+    var parts = composite.split('::');
+    var org = parts[0]; var topic = parts.slice(1).join('::');
+    var key = 'topic:' + org + '::' + topic;
+    if (state.analyses[key]) { openAnalysisModal(key); return; }
+    state.analysing[key] = true; renderResults();
+    try {
+      var r = await apiAnalyseTopic(org, topic);
+      var prov = providerInfo(state.settings.provider);
+      if (r.error) {
+        state.analyses[key] = makeErrAnalysis('Topic Analysis', '#' + topic, 'in ' + org, 'https://github.com/topics/' + encodeURIComponent(topic), r.error, prov);
+      } else {
+        var rows = parseTopicAnalysis(r.summary);
+        var stat = r.topic || {};
+        state.analyses[key] = {
+          title: 'Topic Analysis',
+          subtitleLines: ['#' + topic + ' · org: ' + org, (stat.repoCount || 0) + ' repos · ' + (stat.totalStars || 0).toLocaleString() + ' stars · ' + (stat.totalOpenIssues || 0).toLocaleString() + ' open issues'],
+          rows: rows,
+          providerLabel: prov.label.split(' ')[0],
+          model: state.settings.model || prov.defaultModel,
+          externalUrl: 'https://github.com/topics/' + encodeURIComponent(topic),
+          externalLabel: 'Open topic on GitHub →'
+        };
+      }
+    } catch (e) {
+      state.analyses[key] = makeErrAnalysis('Topic Analysis', '#' + topic, 'in ' + org, 'https://github.com/topics/' + encodeURIComponent(topic), e && e.message, providerInfo(state.settings.provider));
+    }
+    state.analysing[key] = false;
+    renderResults();
+    openAnalysisModal(key);
+  }
+
+  function makeErrAnalysis(title, line1, line2, url, errMsg, prov) {
+    return {
+      title: title,
+      subtitleLines: [line1 || '', line2 || ''],
+      rows: [{ key: 'Error', val: String(errMsg || 'Unknown error') }],
+      providerLabel: prov ? prov.label.split(' ')[0] : '',
+      model: state.settings.model || (prov && prov.defaultModel) || '',
+      externalUrl: url || '',
+      externalLabel: 'Open on GitHub →'
+    };
+  }
+
+  function openAnalysisModal(key) {
+    state.analysisOpenFor = key;
+    renderAnalysisModal();
+  }
+  function closeAnalysisModal() {
+    state.analysisOpenFor = null;
+    renderAnalysisModal();
+  }
+
+  function exportJSON() {
+    var tab = state.activeTab;
+    var c = state[tab];
+    var data;
+    if (tab === 'org') {
+      data = { tab: 'org', org: c.info, topics: c.topics, query: c.query, analyses: state.analyses };
+    } else {
+      data = {
+        tab: tab,
+        searched: c.searched,
+        timeframe: c.timeframe,
+        items: c.dataByTf[c.timeframe] || [],
+        analyses: state.analyses
+      };
+    }
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    var name = tab === 'org' && c.info ? c.info.login : (c.searched && (c.searched.language || c.searched.topic)) || 'export';
+    a.download = 'gapscout-' + tab + '-' + name + '.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  }
+
+  // ---------- Init ----------
+  function init() {
+    updateProviderPill();
+    bindHeader();
+    bindTabs();
+    bindSearch();
+    bindResultsClicks();
+    bindModalClicks();
+    updateSearchButton();
+    renderResults();
+    $('lang-input').focus();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
 </script>
 </body>
 </html>`;
 
-serve({ fetch: app.fetch, port: 3000 }, () => {
-  console.log("GapScout UI running at http://localhost:3000");
-});
+serve({ fetch: app.fetch, port: 3000 }, () =>
+  console.log("GapScout UI running at http://localhost:3000")
+);
