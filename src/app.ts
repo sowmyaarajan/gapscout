@@ -2,14 +2,20 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { GitHubClient } from "./github.js";
 
-const token = process.env.GITHUB_TOKEN;
-if (!token) {
-  console.error("GITHUB_TOKEN env var is required");
-  process.exit(1);
-}
-
+const token = process.env.GITHUB_TOKEN ?? "";
 const github = new GitHubClient(token);
 const app = new Hono();
+
+// Guard all API routes — returns a helpful 503 if GITHUB_TOKEN is missing
+app.use("/api/*", async (c, next) => {
+  if (!process.env.GITHUB_TOKEN) {
+    return c.json(
+      { error: "GITHUB_TOKEN is not configured. Add it in Vercel → Project Settings → Environment Variables." },
+      503
+    );
+  }
+  await next();
+});
 
 app.use("*", cors({
   origin: "*",
