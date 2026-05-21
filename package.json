@@ -7,7 +7,7 @@
     "gapscout": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/bundle-api.mjs",
     "start": "node dist/ui.js",
     "dev": "tsc --watch",
     "test:fetch": "node dist/test-fetch.js",
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "^0.28.0",
     "typescript": "^5.7.2"
   },
   "engines": {
