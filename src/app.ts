@@ -2,18 +2,21 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { GitHubClient } from "./github.js";
 
-const token = process.env.GITHUB_TOKEN ?? "";
-const github = new GitHubClient(token);
-const app = new Hono();
+type Variables = { github: GitHubClient };
+const app = new Hono<{ Variables: Variables }>();
 
-// Guard all API routes — returns a helpful 503 if GITHUB_TOKEN is missing
+// BYO GitHub token — each request brings its own PAT in X-GitHub-Token.
+// /api/analyse, /api/analyse-repo, /api/analyse-topic don't strictly need GitHub
+// for the AI call, but they DO fetch repo metadata first, so we require it everywhere.
 app.use("/api/*", async (c, next) => {
-  if (!process.env.GITHUB_TOKEN) {
+  const headerToken = (c.req.header("x-github-token") ?? "").trim();
+  if (!headerToken) {
     return c.json(
-      { error: "GITHUB_TOKEN is not configured. Add it in Vercel → Project Settings → Environment Variables." },
-      503
+      { error: "GitHub token required. Open the GitHub button in the header and paste your Personal Access Token." },
+      401
     );
   }
+  c.set("github", new GitHubClient(headerToken));
   await next();
 });
 
@@ -41,7 +44,7 @@ app.get("/api/count-issues", async (c) => {
     const language = c.req.query("language") ?? "";
     const topic = c.req.query("topic") ?? "";
     if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
-    const totalCount = await github.countIssues(language, topic || undefined);
+    const totalCount = await c.get("github").countIssues(language, topic || undefined);
     return c.json({ totalCount });
   } catch (e: any) {
     return c.json(safeError(e, "count-issues"), 500);
@@ -58,7 +61,7 @@ app.post("/api/trending-issues", async (c) => {
       tf === "daily" || tf === "weekly" || tf === "monthly" ? tf : "weekly";
     const limits = { daily: 20, weekly: 30, monthly: 50 };
     if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
-    const issues = await github.fetchTrendingIssues(language, topic, timeframe, limits[timeframe]);
+    const issues = await c.get("github").fetchTrendingIssues(language, topic, timeframe, limits[timeframe]);
     return c.json({ issues, timeframe, totalShown: issues.length });
   } catch (e: any) {
     return c.json(safeError(e, "trending-issues"), 500);
@@ -129,7 +132,7 @@ app.post("/api/analyse", async (c) => {
     if (!apiKey || !provider || !repo || !issueTitle) {
       return c.json({ error: "Missing required fields." }, 400);
     }
-    const meta = await github.fetchRepoMeta(String(repo));
+    const meta = await c.get("github").fetchRepoMeta(String(repo));
     const prompt =
       `You are a developer assistant. Analyse this GitHub issue concisely.\n\n` +
       `Repo: ${repo}\n` +
@@ -155,7 +158,7 @@ app.get("/api/count-repos", async (c) => {
     const language = c.req.query("language") ?? "";
     const topic = c.req.query("topic") ?? "";
     if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
-    const totalCount = await github.countRepos(language, topic || undefined);
+    const totalCount = await c.get("github").countRepos(language, topic || undefined);
     return c.json({ totalCount });
   } catch (e: any) {
     return c.json(safeError(e, "count-repos"), 500);
@@ -172,7 +175,7 @@ app.post("/api/trending-repos", async (c) => {
       tf === "daily" || tf === "weekly" || tf === "monthly" ? tf : "weekly";
     const limits = { daily: 20, weekly: 30, monthly: 50 };
     if (!language && !topic) return c.json({ error: "Provide a language or topic." }, 400);
-    const repos = await github.fetchTrendingRepos(language, topic, timeframe, limits[timeframe]);
+    const repos = await c.get("github").fetchTrendingRepos(language, topic, timeframe, limits[timeframe]);
     return c.json({ repos, timeframe, totalShown: repos.length });
   } catch (e: any) {
     return c.json(safeError(e, "trending-repos"), 500);
@@ -185,9 +188,10 @@ app.post("/api/org-topics", async (c) => {
     const org = String(body.org ?? "").trim();
     const topic = body.topic ? String(body.topic).trim() : undefined;
     if (!org) return c.json({ error: "Provide an organization." }, 400);
+    const gh = c.get("github");
     const [info, topics] = await Promise.all([
-      github.fetchOrgInfo(org),
-      github.fetchOrgTopTopics(org, topic, 10),
+      gh.fetchOrgInfo(org),
+      gh.fetchOrgTopTopics(org, topic, 10),
     ]);
     if (!info) return c.json({ error: `Organization not found: ${org}` }, 404);
     return c.json({ info, topics });
@@ -203,9 +207,10 @@ app.post("/api/analyse-repo", async (c) => {
     if (!apiKey || !provider || !repo) {
       return c.json({ error: "Missing required fields." }, 400);
     }
+    const gh = c.get("github");
     const [info, meta] = await Promise.all([
-      github.fetchRepoInfo(String(repo)),
-      github.fetchRepoMeta(String(repo)),
+      gh.fetchRepoInfo(String(repo)),
+      gh.fetchRepoMeta(String(repo)),
     ]);
     if (!info) return c.json({ error: `Repo not found: ${repo}` }, 404);
     const created = info.lastPushed ? "" : "";
@@ -213,7 +218,7 @@ app.post("/api/analyse-repo", async (c) => {
     let createdAtIso = "";
     try {
       const [owner, name] = String(repo).split("/");
-      const { data } = await (github as any).octokit.repos.get({ owner, repo: name });
+      const { data } = await (gh as any).octokit.repos.get({ owner, repo: name });
       createdAtIso = data.created_at ?? "";
     } catch {}
     const ageDays = createdAtIso
@@ -254,7 +259,7 @@ app.post("/api/analyse-topic", async (c) => {
     if (!apiKey || !provider || !org || !topic) {
       return c.json({ error: "Missing required fields." }, 400);
     }
-    const topics = await github.fetchOrgTopTopics(String(org), String(topic), 1);
+    const topics = await c.get("github").fetchOrgTopTopics(String(org), String(topic), 1);
     const match = topics.find((t) => t.name === String(topic).toLowerCase()) || topics[0];
     if (!match) return c.json({ error: `Topic '${topic}' not found in org '${org}'.` }, 404);
     const repoList = match.sampleRepos
@@ -1033,6 +1038,13 @@ body {
           <span class="dot ok"></span>
           <span class="mono small">api · /api/trending-issues</span>
         </div>
+        <button class="settings-btn" id="open-gh-settings">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.7.4-1.2.7-1.5-2.5-.3-5.2-1.3-5.2-5.6 0-1.2.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2.9-.3 1.9-.4 2.9-.4 1 0 2 .1 2.9.4 2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.7.8 1.2 1.9 1.2 3.1 0 4.4-2.7 5.3-5.2 5.6.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6C20.2 21.4 23.5 17.1 23.5 12 23.5 5.7 18.3.5 12 .5z"/>
+          </svg>
+          GitHub
+          <span class="settings-provider mono" id="gh-pill">not set</span>
+        </button>
         <button class="settings-btn" id="open-settings">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" stroke="currentColor" stroke-width="1.6"/>
@@ -1129,6 +1141,7 @@ body {
 </div>
 
 <div id="modal-slot"></div>
+<div id="gh-modal-slot"></div>
 <div id="analysis-modal-slot"></div>
 
 <script>
@@ -1173,6 +1186,9 @@ body {
     settings: loadSettings(),
     settingsOpen: false,
     modalDraft: null,
+    ghToken: loadGhToken(),
+    ghOpen: false,
+    ghDraft: null,
     error: ''
   };
   function cur() { return state[state.activeTab]; }
@@ -1194,6 +1210,20 @@ body {
     localStorage.setItem('gapscout-ai-settings', JSON.stringify(state.settings));
     updateProviderPill();
   }
+
+  function loadGhToken() {
+    try { return localStorage.getItem('gapscout-github-token') || ''; }
+    catch (e) { return ''; }
+  }
+  function saveGhToken(tok) {
+    state.ghToken = (tok || '').trim();
+    try { localStorage.setItem('gapscout-github-token', state.ghToken); } catch (e) {}
+    updateGhPill();
+  }
+  function ghHeaders() {
+    return state.ghToken ? { 'X-GitHub-Token': state.ghToken } : {};
+  }
+  function hasGhToken() { return !!(state.ghToken && state.ghToken.length > 6); }
 
   function $(id) { return document.getElementById(id); }
   function esc(s) {
@@ -1219,84 +1249,73 @@ body {
   }
 
   // ---------- API ----------
+  function jsonHeaders() {
+    var h = { 'Content-Type': 'application/json' };
+    var g = ghHeaders();
+    for (var k in g) h[k] = g[k];
+    return h;
+  }
+  function apiGet(url) {
+    return fetch(url, { headers: ghHeaders() }).then(function(r){ return r.json(); });
+  }
+  function apiPost(url, body) {
+    return fetch(url, { method: 'POST', headers: jsonHeaders(), body: JSON.stringify(body) })
+      .then(function(r){ return r.json(); });
+  }
   function apiCount(lang, topic) {
     var p = new URLSearchParams();
     if (lang) p.set('language', lang);
     if (topic) p.set('topic', topic);
-    return fetch('/api/count-issues?' + p.toString()).then(function(r){ return r.json(); });
+    return apiGet('/api/count-issues?' + p.toString());
   }
   function apiTrending(lang, topic, tf) {
-    return fetch('/api/trending-issues', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ language: lang, topic: topic || undefined, timeframe: tf })
-    }).then(function(r){ return r.json(); });
+    return apiPost('/api/trending-issues', { language: lang, topic: topic || undefined, timeframe: tf });
   }
   function apiAnalyse(issue) {
     var s = state.settings;
     var providerForApi = s.provider === 'anthropic' ? 'claude' : s.provider;
-    return fetch('/api/analyse', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: s.apiKey,
-        provider: providerForApi,
-        model: s.model || providerInfo(s.provider).defaultModel,
-        repo: issue.repo,
-        issueTitle: issue.title,
-        issueBody: issue.body || '',
-        labels: issue.labels || []
-      })
-    }).then(function(r){ return r.json(); });
+    return apiPost('/api/analyse', {
+      apiKey: s.apiKey,
+      provider: providerForApi,
+      model: s.model || providerInfo(s.provider).defaultModel,
+      repo: issue.repo,
+      issueTitle: issue.title,
+      issueBody: issue.body || '',
+      labels: issue.labels || []
+    });
   }
   function apiCountRepos(lang, topic) {
     var p = new URLSearchParams();
     if (lang) p.set('language', lang);
     if (topic) p.set('topic', topic);
-    return fetch('/api/count-repos?' + p.toString()).then(function(r){ return r.json(); });
+    return apiGet('/api/count-repos?' + p.toString());
   }
   function apiTrendingRepos(lang, topic, tf) {
-    return fetch('/api/trending-repos', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ language: lang, topic: topic || undefined, timeframe: tf })
-    }).then(function(r){ return r.json(); });
+    return apiPost('/api/trending-repos', { language: lang, topic: topic || undefined, timeframe: tf });
   }
   function apiOrgTopics(org, topic) {
-    return fetch('/api/org-topics', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ org: org, topic: topic || undefined })
-    }).then(function(r){ return r.json(); });
+    return apiPost('/api/org-topics', { org: org, topic: topic || undefined });
   }
   function apiAnalyseRepo(fullName) {
     var s = state.settings;
     var providerForApi = s.provider === 'anthropic' ? 'claude' : s.provider;
-    return fetch('/api/analyse-repo', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: s.apiKey,
-        provider: providerForApi,
-        model: s.model || providerInfo(s.provider).defaultModel,
-        repo: fullName
-      })
-    }).then(function(r){ return r.json(); });
+    return apiPost('/api/analyse-repo', {
+      apiKey: s.apiKey,
+      provider: providerForApi,
+      model: s.model || providerInfo(s.provider).defaultModel,
+      repo: fullName
+    });
   }
   function apiAnalyseTopic(org, topic) {
     var s = state.settings;
     var providerForApi = s.provider === 'anthropic' ? 'claude' : s.provider;
-    return fetch('/api/analyse-topic', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: s.apiKey,
-        provider: providerForApi,
-        model: s.model || providerInfo(s.provider).defaultModel,
-        org: org,
-        topic: topic
-      })
-    }).then(function(r){ return r.json(); });
+    return apiPost('/api/analyse-topic', {
+      apiKey: s.apiKey,
+      provider: providerForApi,
+      model: s.model || providerInfo(s.provider).defaultModel,
+      org: org,
+      topic: topic
+    });
   }
 
   function providerInfo(id) {
@@ -1349,6 +1368,81 @@ body {
   function updateProviderPill() {
     var pill = $('provider-pill');
     if (pill) pill.textContent = providerInfo(state.settings.provider).short;
+  }
+  function updateGhPill() {
+    var pill = $('gh-pill');
+    if (!pill) return;
+    if (hasGhToken()) {
+      pill.textContent = 'connected';
+      pill.style.color = 'var(--ok)';
+    } else {
+      pill.textContent = 'not set';
+      pill.style.color = 'var(--danger)';
+    }
+  }
+
+  function renderGhModal() {
+    var slot = $('gh-modal-slot');
+    if (!slot) return;
+    if (!state.ghOpen) { slot.innerHTML = ''; return; }
+    var d = state.ghDraft || { token: '', showToken: false };
+    var valid = (d.token || '').trim().length > 6;
+    var statusHtml = valid
+      ? '<span class="dot ok"></span> Ready'
+      : '<span class="dot warn"></span> Paste a token';
+    slot.innerHTML = ''
+      + '<div class="modal-scrim" id="gh-modal-scrim">'
+      +   '<div class="modal" role="dialog" aria-label="GitHub Token" id="gh-modal-panel">'
+      +     '<div class="modal-head">'
+      +       '<div>'
+      +         '<div class="modal-title">GitHub Token</div>'
+      +         '<div class="modal-sub">Required for all searches. Token stays in your browser — sent only on the request that uses it.</div>'
+      +       '</div>'
+      +       '<button class="icon-btn" id="gh-modal-close" aria-label="Close">✕</button>'
+      +     '</div>'
+      +     '<div class="modal-body">'
+      +       '<div class="form-row">'
+      +         '<label>Personal Access Token (classic)</label>'
+      +         '<div class="input-wrap key-wrap">'
+      +           '<span class="input-icon">⚿</span>'
+      +           '<input id="gh-modal-token" type="' + (d.showToken ? 'text' : 'password') + '" value="' + esc(d.token) + '" placeholder="ghp_…" spellcheck="false" autocomplete="off"/>'
+      +           '<button type="button" class="ghost-mini" id="gh-toggle-token">' + (d.showToken ? 'hide' : 'show') + '</button>'
+      +         '</div>'
+      +         '<div class="form-help">'
+      +           'Generate at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">github.com/settings/tokens</a>'
+      +           ' → <em>Generate new token (classic)</em> → name it <span class="mono">gapscout</span>,'
+      +           ' leave <strong>all scopes unchecked</strong> (public data only), set an expiration, click Generate, then paste it here.'
+      +         '</div>'
+      +         '<div class="form-help">Even with no scopes, a token gives <strong>5,000 requests/hour</strong> (vs 60 unauthenticated). Stored in <span class="mono">localStorage</span>.</div>'
+      +       '</div>'
+      +     '</div>'
+      +     '<div class="modal-foot">'
+      +       '<div class="foot-status">' + statusHtml + '</div>'
+      +       '<div class="foot-actions">'
+      +         '<button class="btn btn-ghost" id="gh-modal-cancel">Cancel</button>'
+      +         '<button class="btn btn-primary" id="gh-modal-save"' + (valid ? '' : ' disabled') + '>Save</button>'
+      +       '</div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function openGhModal() {
+    state.ghDraft = { token: state.ghToken || '', showToken: false };
+    state.ghOpen = true;
+    renderGhModal();
+    setTimeout(function(){ var i = $('gh-modal-token'); if (i) i.focus(); }, 0);
+  }
+  function closeGhModal() {
+    state.ghOpen = false;
+    state.ghDraft = null;
+    renderGhModal();
+  }
+  function onSaveGhToken() {
+    var d = state.ghDraft;
+    if (!d) return;
+    saveGhToken(d.token);
+    closeGhModal();
   }
 
   function updateSearchButton() {
@@ -1856,6 +1950,8 @@ body {
   // ---------- Event handlers ----------
   function bindHeader() {
     $('open-settings').addEventListener('click', openModal);
+    var ghBtn = $('open-gh-settings');
+    if (ghBtn) ghBtn.addEventListener('click', openGhModal);
   }
   function bindTabs() {
     document.querySelectorAll('.tab-pill').forEach(function(btn){
@@ -1927,6 +2023,15 @@ body {
         if (e.target.id === 'analysis-scrim') { closeAnalysisModal(); return; }
         if (e.target.id === 'analysis-close' || (e.target.closest && e.target.closest('#analysis-close'))) { closeAnalysisModal(); return; }
       }
+      // GitHub Token modal
+      if (state.ghOpen) {
+        if (e.target.id === 'gh-modal-scrim') { closeGhModal(); return; }
+        if (e.target.id === 'gh-modal-close' || (e.target.closest && e.target.closest('#gh-modal-close'))) { closeGhModal(); return; }
+        if (e.target.id === 'gh-modal-cancel') { closeGhModal(); return; }
+        if (e.target.id === 'gh-modal-save')   { onSaveGhToken(); return; }
+        if (e.target.id === 'gh-toggle-token') { state.ghDraft.showToken = !state.ghDraft.showToken; renderGhModal(); return; }
+        return;
+      }
       if (!state.settingsOpen) return;
       if (e.target.id === 'modal-scrim') { closeModal(); return; }
       if (e.target.id === 'modal-close' || e.target.closest('#modal-close')) { closeModal(); return; }
@@ -1948,6 +2053,15 @@ body {
       }
     });
     document.body.addEventListener('input', function(e){
+      if (state.ghOpen && e.target.id === 'gh-modal-token') {
+        state.ghDraft.token = e.target.value;
+        var valid = (state.ghDraft.token || '').trim().length > 6;
+        var foot = document.querySelector('#gh-modal-panel .foot-status');
+        if (foot) foot.innerHTML = valid ? '<span class="dot ok"></span> Ready' : '<span class="dot warn"></span> Paste a token';
+        var btn = $('gh-modal-save');
+        if (btn) btn.disabled = !valid;
+        return;
+      }
       if (!state.settingsOpen) return;
       if (e.target.id === 'modal-key')   { state.modalDraft.apiKey = e.target.value; refreshFootStatus(); }
       if (e.target.id === 'modal-model') { state.modalDraft.model  = e.target.value; refreshFootStatus(); }
@@ -1955,6 +2069,7 @@ body {
     document.addEventListener('keydown', function(e){
       if (e.key === 'Escape') {
         if (state.analysisOpenFor) { closeAnalysisModal(); return; }
+        if (state.ghOpen) { closeGhModal(); return; }
         if (state.settingsOpen) closeModal();
       }
     });
@@ -1981,6 +2096,7 @@ body {
     var lang = $('lang-input').value.trim();
     var topic = $('topic-input').value.trim();
     if (!lang && !topic) return;
+    if (!hasGhToken()) { openGhModal(); return; }
     setError('');
     var c = state[tab];
     c.searching = true;
@@ -2015,6 +2131,7 @@ body {
     var org = $('org-input').value.trim();
     var topic = $('org-topic-input').value.trim();
     if (!org) return;
+    if (!hasGhToken()) { openGhModal(); return; }
     setError('');
     state.org.searching = true;
     state.org.info = null;
@@ -2064,12 +2181,17 @@ body {
   }
 
   async function onAnalyseIssue(issueKeyRaw) {
+    if (!hasGhToken()) { openGhModal(); return; }
     if (!state.settings.apiKey) { openModal(); return; }
     var key = 'issue:' + issueKeyRaw;
     if (state.analyses[key]) { openAnalysisModal(key); return; }
     var c = state.issues;
     var issue = (c.dataByTf[c.timeframe] || []).find(function(it){ return issueKey(it) === issueKeyRaw; });
-    if (!issue) return;
+    if (!issue) {
+      state.analyses[key] = makeErrAnalysis('Issue Analysis', issueKeyRaw, '', '', 'Issue data not loaded — try Search again.', providerInfo(state.settings.provider));
+      openAnalysisModal(key);
+      return;
+    }
     state.analysing[key] = true; renderResults();
     try {
       var r = await apiAnalyse(issue);
@@ -2101,6 +2223,7 @@ body {
   }
 
   async function onAnalyseRepo(fullName) {
+    if (!hasGhToken()) { openGhModal(); return; }
     if (!state.settings.apiKey) { openModal(); return; }
     var key = 'repo:' + fullName;
     if (state.analyses[key]) { openAnalysisModal(key); return; }
@@ -2131,6 +2254,7 @@ body {
   }
 
   async function onAnalyseTopic(composite) {
+    if (!hasGhToken()) { openGhModal(); return; }
     if (!state.settings.apiKey) { openModal(); return; }
     var parts = composite.split('::');
     var org = parts[0]; var topic = parts.slice(1).join('::');
@@ -2211,6 +2335,7 @@ body {
   // ---------- Init ----------
   function init() {
     updateProviderPill();
+    updateGhPill();
     bindHeader();
     bindTabs();
     bindSearch();
