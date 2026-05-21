@@ -1800,7 +1800,7 @@ body {
       +       commentsPill
       +       '<div class="labels">' + labels + '</div>'
       +       '<div class="spacer"></div>'
-      +       '<button class="' + analyseClasses + '" data-analyse="' + esc(k) + '"' + (analysing ? ' disabled' : '') + '>' + analyseLabel + '</button>'
+      +       '<button class="' + analyseClasses + '" data-analyse="' + esc(issueKey(iss)) + '"' + (analysing ? ' disabled' : '') + '>' + analyseLabel + '</button>'
       +     '</div>'
       +   '</div>'
       + '</div>';
