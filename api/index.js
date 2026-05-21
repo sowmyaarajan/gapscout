@@ -1,4 +1,4 @@
-import { app } from './bundle.js';
+import { app } from './_lib/bundle.js';
 
 export const config = { maxDuration: 60 };
 

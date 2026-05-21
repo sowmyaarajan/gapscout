@@ -8,11 +8,11 @@ await build({
   platform: 'node',
   target: 'node18',
   format: 'esm',
-  outfile: 'api/bundle.js',
+  outfile: 'api/_lib/bundle.js',
   minify: false,
   treeShaking: true,
   // dotenv is not needed on Vercel (env vars injected by platform)
   external: ['dotenv'],
 });
 
-console.log('Bundled src/app.ts → api/bundle.js');
+console.log('Bundled src/app.ts → api/_lib/bundle.js');
